@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex Prompt Runner</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="workspace" aria-labelledby="app-title">
+        <div class="header">
+          <div>
+            <p class="eyebrow">FastAPI async runner</p>
+            <h1 id="app-title">Codex Prompt Runner</h1>
+          </div>
+          <button class="icon-button" id="refresh" type="button" aria-label="Refresh jobs" title="Refresh jobs">
+            <span aria-hidden="true">R</span>
+          </button>
+        </div>
+
+        <form id="prompt-form" class="composer">
+          <label for="prompt">Prompt</label>
+          <textarea id="prompt" name="prompt" rows="8" maxlength="20000" placeholder="Describe the work Codex should do..." required></textarea>
+          <div class="actions">
+            <p id="form-status" role="status" aria-live="polite"></p>
+            <button id="submit" type="submit">Run Codex</button>
+          </div>
+        </form>
+
+        <section class="jobs-panel" aria-labelledby="jobs-title">
+          <div class="jobs-header">
+            <h2 id="jobs-title">Jobs</h2>
+            <span id="job-count">0</span>
+          </div>
+          <div id="jobs" class="jobs" aria-live="polite"></div>
+        </section>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
