@@ -5,8 +5,11 @@ import io
 import json
 import os
 import re
+import shutil
 import textwrap
+import time
 import zipfile
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -14,10 +17,11 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from .codex_runner import CodexRunError, run_codex
 from scripts.generate_maycad_shelf import ShelfSceneBuilder, generate_three_views, safe_name
@@ -28,7 +32,17 @@ PROJECT_DIR = APP_DIR.parent
 STATIC_DIR = APP_DIR / "static"
 TASKS_DIR = Path(os.getenv("TASKS_DIR") or PROJECT_DIR / "tasks").expanduser().resolve()
 MAX_PROMPT_LENGTH = 20_000
+MAX_IMAGE_COUNT = 8
+MAX_IMAGE_BYTES = 15 * 1024 * 1024
+IMAGE_CHUNK_BYTES = 1024 * 1024
 HIDDEN_GENERATED_FILES = {"codex_prompt.md", "shelf_requirements.md"}
+IMAGE_INPUT_DIR = "input_images"
+ALLOWED_IMAGE_TYPES = {
+    "image/gif": ".gif",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
 
 
 class JobStatus(StrEnum):
@@ -98,12 +112,102 @@ def preview_prompt(prompt: str) -> str:
     return normalized[:140] + ("..." if len(normalized) > 140 else "")
 
 
-def create_task_files(job_id: str, prompt: str) -> tuple[Path, Path, Path]:
-    task_dir = TASKS_DIR / job_id
-    requirement_path = task_dir / "shelf_requirements.md"
-    scene_path = task_dir / f"{job_id}.scene"
+def validate_prompt(prompt: str) -> str:
+    prompt = prompt.strip()
+    if not prompt:
+        raise HTTPException(status_code=422, detail="需求不能为空。")
+    if len(prompt) > MAX_PROMPT_LENGTH:
+        raise HTTPException(status_code=422, detail=f"需求不能超过 {MAX_PROMPT_LENGTH} 个字符。")
+    return prompt
 
-    task_dir.mkdir(parents=True, exist_ok=False)
+
+async def parse_create_job_request(request: Request) -> tuple[str, list[StarletteUploadFile]]:
+    content_type = request.headers.get("content-type", "").lower()
+    if content_type.startswith("multipart/form-data"):
+        form = await request.form()
+        prompt_value = form.get("prompt")
+        prompt = prompt_value if isinstance(prompt_value, str) else ""
+        uploads = [
+            item
+            for item in form.getlist("images")
+            if isinstance(item, StarletteUploadFile) and item.filename
+        ]
+        return validate_prompt(prompt), uploads
+
+    try:
+        payload = CreateJobRequest.model_validate(await request.json())
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="请求体必须包含 prompt。") from exc
+    return validate_prompt(payload.prompt), []
+
+
+def validate_image_uploads(uploads: list[StarletteUploadFile]) -> None:
+    if len(uploads) > MAX_IMAGE_COUNT:
+        raise HTTPException(status_code=422, detail=f"最多只能上传 {MAX_IMAGE_COUNT} 张图片。")
+
+    for upload in uploads:
+        if upload.content_type not in ALLOWED_IMAGE_TYPES:
+            raise HTTPException(status_code=422, detail=f"不支持的图片类型：{upload.content_type or 'unknown'}。")
+
+
+def safe_upload_name(upload: StarletteUploadFile, index: int) -> str:
+    raw_name = Path(upload.filename or "").name
+    raw_path = Path(raw_name)
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw_path.stem).strip("._")
+    suffix = raw_path.suffix.lower() or ALLOWED_IMAGE_TYPES.get(upload.content_type or "", ".png")
+    allowed_suffixes = set(ALLOWED_IMAGE_TYPES.values()) | {".jpeg"}
+    if suffix not in allowed_suffixes:
+        suffix = ALLOWED_IMAGE_TYPES.get(upload.content_type or "", ".png")
+
+    return f"{index:02d}_{(stem or 'image')[:80]}{suffix}"
+
+
+async def save_image_uploads(
+    uploads: list[StarletteUploadFile],
+    task_dir: Path,
+) -> list[Path]:
+    validate_image_uploads(uploads)
+    if not uploads:
+        return []
+
+    image_dir = task_dir / IMAGE_INPUT_DIR
+    image_dir.mkdir(parents=True, exist_ok=True)
+    image_paths: list[Path] = []
+
+    for index, upload in enumerate(uploads, start=1):
+        target_path = image_dir / safe_upload_name(upload, index)
+        written_bytes = 0
+        try:
+            with target_path.open("wb") as target:
+                while chunk := await upload.read(IMAGE_CHUNK_BYTES):
+                    written_bytes += len(chunk)
+                    if written_bytes > MAX_IMAGE_BYTES:
+                        raise HTTPException(status_code=422, detail=f"单张图片不能超过 {MAX_IMAGE_BYTES // 1024 // 1024} MB。")
+                    target.write(chunk)
+        finally:
+            await upload.close()
+
+        image_paths.append(target_path)
+
+    return image_paths
+
+
+def image_lines(image_paths: list[Path], task_dir: Path) -> list[str]:
+    return [
+        f"- {path.relative_to(task_dir).as_posix()} ({path.resolve()})"
+        for path in image_paths
+    ]
+
+
+def write_requirement_file(
+    *,
+    job_id: str,
+    prompt: str,
+    task_dir: Path,
+    requirement_path: Path,
+    image_paths: list[Path],
+) -> None:
+    images_section = "\n".join(image_lines(image_paths, task_dir)) if image_paths else "None"
     requirement_path.write_text(
         textwrap.dedent(
             f"""\
@@ -114,9 +218,28 @@ def create_task_files(job_id: str, prompt: str) -> tuple[Path, Path, Path]:
             ```text
             {prompt}
             ```
+
+            ## Reference Images
+
+            {images_section}
             """
         ),
         encoding="utf-8",
+    )
+
+
+def create_task_files(job_id: str, prompt: str) -> tuple[Path, Path, Path]:
+    task_dir = TASKS_DIR / job_id
+    requirement_path = task_dir / "shelf_requirements.md"
+    scene_path = task_dir / f"{job_id}.scene"
+
+    task_dir.mkdir(parents=True, exist_ok=False)
+    write_requirement_file(
+        job_id=job_id,
+        prompt=prompt,
+        task_dir=task_dir,
+        requirement_path=requirement_path,
+        image_paths=[],
     )
 
     return task_dir, requirement_path, scene_path
@@ -129,7 +252,14 @@ def build_maycad_prompt(
     task_dir: Path,
     requirement_path: Path,
     scene_path: Path,
+    image_paths: list[Path] | None = None,
 ) -> str:
+    image_paths = image_paths or []
+    image_section = (
+        "\n".join(image_lines(image_paths, task_dir))
+        if image_paths
+        else "No reference images were attached."
+    )
     return textwrap.dedent(
         f"""\
         You are working on AutoMaycad task {job_id}.
@@ -162,6 +292,12 @@ def build_maycad_prompt(
           user does not specify materials.
         - At the end, report the scene path and the generated files.
 
+        Reference images attached to the initial prompt:
+        {image_section}
+
+        If reference images are attached, inspect them and use them as visual
+        requirements alongside the written text.
+
         User shelf/rack requirement:
         {user_prompt}
         """
@@ -183,6 +319,47 @@ def generated_files(task_dir: Path) -> list[str]:
 
 def scene_files(task_dir: Path) -> list[str]:
     return [item for item in generated_files(task_dir) if item.lower().endswith(".scene")]
+
+
+def task_activity_snapshot(task_dir: Path) -> tuple[tuple[str, int, int], ...]:
+    if not task_dir.exists():
+        return ()
+
+    files: list[tuple[str, int, int]] = []
+    for path in task_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            stat = path.stat()
+            relative_path = path.relative_to(task_dir).as_posix()
+        except OSError:
+            continue
+        files.append((relative_path, stat.st_size, stat.st_mtime_ns))
+    return tuple(sorted(files))
+
+
+def task_completion_check(task_dir: Path, stable_seconds: float = 5.0) -> Callable[[], bool]:
+    stable_snapshot: tuple[tuple[str, int, int], ...] | None = None
+    stable_since = 0.0
+
+    def check() -> bool:
+        nonlocal stable_snapshot, stable_since
+
+        if not scene_files(task_dir):
+            stable_snapshot = None
+            stable_since = 0.0
+            return False
+
+        snapshot = task_activity_snapshot(task_dir)
+        now = time.monotonic()
+        if snapshot != stable_snapshot:
+            stable_snapshot = snapshot
+            stable_since = now
+            return False
+
+        return now - stable_since >= stable_seconds
+
+    return check
 
 
 def refresh_job_files(job: Job) -> None:
@@ -337,7 +514,12 @@ def run_local_shelf_generator(job_id: str, prompt: str, task_dir: Path) -> str |
     return f"本地 MAYCAD 货架生成器已写入 {scene_path}。"
 
 
-async def execute_job(job_id: str, user_prompt: str, codex_prompt: str) -> None:
+async def execute_job(
+    job_id: str,
+    user_prompt: str,
+    codex_prompt: str,
+    image_paths: list[Path] | None = None,
+) -> None:
     async with jobs_lock:
         job = jobs[job_id]
         job.status = JobStatus.RUNNING
@@ -347,11 +529,28 @@ async def execute_job(job_id: str, user_prompt: str, codex_prompt: str) -> None:
     result: str | None = None
     error: str | None = None
     try:
-        result = await run_codex(codex_prompt)
+        result = await run_codex(
+            codex_prompt,
+            image_paths=[str(path) for path in image_paths or []],
+            completion_check=task_completion_check(task_dir),
+            activity_snapshot=lambda: task_activity_snapshot(task_dir),
+        )
     except CodexRunError as exc:
-        status = JobStatus.FAILED
         result = exc.output or None
-        error = str(exc)
+        if scene_files(task_dir):
+            status = JobStatus.SUCCEEDED
+            error = None
+            result = "\n\n".join(
+                item
+                for item in (
+                    result,
+                    f"Codex 返回异常（{exc}），但任务目录中已找到 .scene 文件，按生成成功处理。",
+                )
+                if item
+            )
+        else:
+            status = JobStatus.FAILED
+            error = str(exc)
     else:
         scenes = scene_files(task_dir)
         if scenes:
@@ -398,16 +597,29 @@ async def job_page(job_id: str) -> FileResponse:
 
 
 @app.post("/api/jobs", response_model=CreateJobResponse, status_code=202)
-async def create_job(payload: CreateJobRequest) -> CreateJobResponse:
-    prompt = payload.prompt.strip()
-    if not prompt:
-        raise HTTPException(status_code=422, detail="需求不能为空。")
+async def create_job(request: Request) -> CreateJobResponse:
+    prompt, uploads = await parse_create_job_request(request)
+    validate_image_uploads(uploads)
 
     job_id = uuid4().hex
     try:
         task_dir, requirement_path, scene_path = create_task_files(job_id, prompt)
+        image_paths = await save_image_uploads(uploads, task_dir)
+        write_requirement_file(
+            job_id=job_id,
+            prompt=prompt,
+            task_dir=task_dir,
+            requirement_path=requirement_path,
+            image_paths=image_paths,
+        )
     except OSError as exc:
+        if "task_dir" in locals():
+            shutil.rmtree(task_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=f"无法创建任务文件夹：{exc}") from exc
+    except HTTPException:
+        if "task_dir" in locals():
+            shutil.rmtree(task_dir, ignore_errors=True)
+        raise
 
     codex_prompt = build_maycad_prompt(
         job_id=job_id,
@@ -415,6 +627,7 @@ async def create_job(payload: CreateJobRequest) -> CreateJobResponse:
         task_dir=task_dir,
         requirement_path=requirement_path,
         scene_path=scene_path,
+        image_paths=image_paths,
     )
     (task_dir / "codex_prompt.md").write_text(codex_prompt, encoding="utf-8")
 
@@ -432,7 +645,7 @@ async def create_job(payload: CreateJobRequest) -> CreateJobResponse:
     async with jobs_lock:
         jobs[job_id] = job
 
-    asyncio.create_task(execute_job(job_id, prompt, codex_prompt))
+    asyncio.create_task(execute_job(job_id, prompt, codex_prompt, image_paths))
 
     return CreateJobResponse(
         accepted=True,
@@ -477,7 +690,8 @@ async def download_job_file(job_id: str, file_path: str) -> FileResponse:
     if not resolved_path.is_file():
         raise HTTPException(status_code=404, detail="找不到该文件。")
 
-    return FileResponse(resolved_path, filename=resolved_path.name)
+    download_name = "scene文件.scene" if resolved_path.suffix.lower() == ".scene" else resolved_path.name
+    return FileResponse(resolved_path, filename=download_name)
 
 
 @app.get("/api/jobs/{job_id}/download-all")

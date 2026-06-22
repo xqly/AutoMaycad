@@ -28,6 +28,11 @@
         <form id="prompt-form" class="composer app-view">
           <label for="prompt">货架需求</label>
           <textarea id="prompt" name="prompt" rows="8" maxlength="20000" placeholder="示例：长 2000 mm、深 600 mm、高 1800 mm 的铝型材货架，4 层，3 跨，中密度纤维板层板..." required></textarea>
+          <div class="image-uploader">
+            <label for="images">参考图片</label>
+            <input id="images" name="images" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple />
+            <div id="image-list" class="image-list" aria-live="polite"></div>
+          </div>
           <div class="actions">
             <p id="form-status" role="status" aria-live="polite"></p>
             <button id="submit" type="submit">创建任务</button>

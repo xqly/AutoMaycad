@@ -30,6 +30,7 @@ body {
 }
 
 button,
+input,
 textarea {
   font: inherit;
 }
@@ -209,6 +210,67 @@ textarea:focus {
   border-color: var(--accent);
 }
 
+.image-uploader {
+  display: grid;
+  gap: 8px;
+}
+
+.image-uploader input[type="file"] {
+  width: 100%;
+  min-height: 46px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px;
+  background: #fbfcfd;
+  color: var(--muted);
+}
+
+.image-uploader input[type="file"]:focus {
+  outline: 3px solid rgba(15, 118, 110, 0.2);
+  border-color: var(--accent);
+}
+
+.image-list,
+.job-image-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.image-chip {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  max-width: 260px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px;
+  background: var(--surface-soft);
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.image-chip img,
+.job-image-link img {
+  display: block;
+  object-fit: cover;
+}
+
+.image-chip img {
+  width: 42px;
+  height: 42px;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.image-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .actions,
 .jobs-header {
   display: flex;
@@ -280,11 +342,38 @@ textarea:focus {
 }
 
 .job-preview,
+.job-images,
 .job-files,
 .job-output {
   display: grid;
   grid-column: 1 / -1;
   gap: 8px;
+}
+
+.job-images {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.job-image-link {
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px;
+  background: var(--surface-soft);
+}
+
+.job-image-link:hover,
+.job-image-link:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.job-image-link img {
+  width: 108px;
+  height: 82px;
+  border-radius: 6px;
+  background: #ffffff;
 }
 
 .job-preview {
@@ -433,25 +522,6 @@ textarea:focus {
   justify-items: end;
   gap: 8px;
   align-self: start;
-}
-
-.download-all {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 6px 9px;
-  background: var(--surface-soft);
-  color: var(--text);
-  text-align: center;
-  text-decoration: none;
-  font-size: 0.78rem;
-  font-weight: 800;
-}
-
-.download-all:hover,
-.download-all:focus-visible {
-  border-color: var(--accent);
-  color: var(--accent);
-  outline: none;
 }
 
 .status {

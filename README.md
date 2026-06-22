@@ -3,14 +3,15 @@
 A small FastAPI site for turning shelf/rack requirements into asynchronous
 Codex tasks that generate MAYCAD `.scene` files.
 
-The browser submits a shelf requirement, the API creates a task ID and a folder
-under `tasks/<task-id>/`, then starts Codex in the background. Codex receives a
-MAYCAD-specific prompt that requires the final scene file to be written into
-that task folder.
+The browser submits a shelf requirement plus optional reference images, the API
+creates a task ID and a folder under `tasks/<task-id>/`, then starts Codex in
+the background. Codex receives a MAYCAD-specific prompt, with uploaded images
+attached to the initial prompt, that requires the final scene file to be written
+into that task folder.
 
 The UI shows whether each job is queued, running, succeeded, or failed. It also
-shows the task folder, expected scene path, generated files, and captured Codex
-output when available.
+shows the task folder, expected scene path, uploaded images, generated files,
+and captured Codex output when available.
 
 Jobs are stored in memory, so job history is cleared when the server restarts.
 Generated task folders remain on disk.
@@ -58,7 +59,8 @@ You can change this with environment variables:
 ```powershell
 $env:CODEX_COMMAND = "codex"
 $env:CODEX_ARGS = "exec --skip-git-repo-check"
-$env:CODEX_TIMEOUT_SECONDS = "900"
+$env:CODEX_MAX_RUNTIME_SECONDS = "1800"
+$env:CODEX_IDLE_TIMEOUT_SECONDS = "600"
 $env:CODEX_OUTPUT_LIMIT_CHARS = "50000"
 $env:CODEX_WORKDIR = "C:\path\to\workspace"
 $env:CODEX_HOME = "C:\Users\xqly\.codex"
@@ -67,6 +69,14 @@ uvicorn app.main:app --reload
 ```
 
 `CODEX_ARGS` is split like a shell command, but the prompt itself is passed as a separate subprocess argument.
+Uploaded prompt images are stored under `tasks/<task-id>/input_images/` and
+passed to `codex exec` with repeated `--image <file>` arguments. The web form
+accepts up to 8 PNG, JPEG, GIF, or WebP files, with a 15 MB limit per image.
+The app now treats a generated, stable `.scene` file as the primary completion
+signal. `CODEX_IDLE_TIMEOUT_SECONDS` only fails a run when Codex has no output
+and the task folder has no file changes for that many seconds. `CODEX_MAX_RUNTIME_SECONDS`
+is a final safety cap. The older `CODEX_TIMEOUT_SECONDS` is still accepted as a
+fallback for the maximum runtime.
 
 For exact argument control, especially on Windows, you can use JSON instead:
 

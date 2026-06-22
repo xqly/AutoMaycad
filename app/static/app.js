@@ -1,5 +1,7 @@
 const form = document.querySelector("#prompt-form");
 const promptInput = document.querySelector("#prompt");
+const imageInput = document.querySelector("#images");
+const imageList = document.querySelector("#image-list");
 const submitButton = document.querySelector("#submit");
 const formStatus = document.querySelector("#form-status");
 const jobsView = document.querySelector("#jobs-view");
@@ -12,6 +14,9 @@ const refreshButton = document.querySelector("#refresh");
 const toast = document.querySelector("#toast");
 
 const activeStatuses = new Set(["queued", "running"]);
+const maxImageCount = 8;
+const maxImageBytes = 15 * 1024 * 1024;
+const allowedImageTypes = new Set(["image/gif", "image/jpeg", "image/png", "image/webp"]);
 const statusLabels = {
   queued: "排队中",
   running: "运行中",
@@ -21,6 +26,7 @@ const statusLabels = {
 const views = [form, jobsView, jobView];
 let pollTimer = null;
 let toastTimer = null;
+let imagePreviewUrls = [];
 
 function pathLabel(path) {
   if (!path) {
@@ -47,14 +53,10 @@ function downloadUrl(jobId, file) {
   return `/api/jobs/${encodeURIComponent(jobId)}/files/${encodedFile}`;
 }
 
-function downloadAllUrl(jobId) {
-  return `/api/jobs/${encodeURIComponent(jobId)}/download-all`;
-}
-
 function displayFileName(file) {
   const lowerFile = file.toLowerCase();
   if (lowerFile.endsWith(".scene")) {
-    return "场景文件";
+    return "scene文件";
   }
   if (lowerFile.endsWith("_spec.json")) {
     return "规格参数文件";
@@ -73,6 +75,9 @@ function displayFileName(file) {
   }
   if (lowerFile.endsWith(".log")) {
     return "日志文件";
+  }
+  if (lowerFile.startsWith("input_images/")) {
+    return "输入图片";
   }
   return "生成文件";
 }
@@ -168,6 +173,64 @@ function setFormState(message, disabled = false) {
   submitButton.disabled = disabled;
 }
 
+function selectedImages() {
+  return Array.from(imageInput.files || []);
+}
+
+function clearImagePreviewUrls() {
+  imagePreviewUrls.forEach((url) => URL.revokeObjectURL(url));
+  imagePreviewUrls = [];
+}
+
+function renderImageList() {
+  clearImagePreviewUrls();
+  const images = selectedImages();
+  imageList.replaceChildren();
+
+  images.forEach((image) => {
+    const previewUrl = URL.createObjectURL(image);
+    imagePreviewUrls.push(previewUrl);
+
+    const item = document.createElement("div");
+    item.className = "image-chip";
+
+    const preview = document.createElement("img");
+    preview.src = previewUrl;
+    preview.alt = image.name;
+
+    const name = document.createElement("span");
+    name.textContent = image.name;
+
+    item.append(preview, name);
+    imageList.append(item);
+  });
+}
+
+function validateImages(images) {
+  if (images.length > maxImageCount) {
+    return `最多只能上传 ${maxImageCount} 张图片。`;
+  }
+
+  const unsupported = images.find((image) => !allowedImageTypes.has(image.type));
+  if (unsupported) {
+    return `不支持的图片类型：${unsupported.name}`;
+  }
+
+  const oversized = images.find((image) => image.size > maxImageBytes);
+  if (oversized) {
+    return `单张图片不能超过 ${Math.floor(maxImageBytes / 1024 / 1024)} MB：${oversized.name}`;
+  }
+
+  return "";
+}
+
+function errorMessageFromResponse(response, fallback) {
+  return response
+    .json()
+    .then((payload) => payload.detail || fallback)
+    .catch(() => fallback);
+}
+
 function showToast(message) {
   window.clearTimeout(toastTimer);
   toast.textContent = message;
@@ -191,7 +254,7 @@ function appendPaths(container, job) {
   const hasScene = job.generated_files?.some((file) => file.toLowerCase().endsWith(".scene"));
   [
     ["任务文件夹", "已保存"],
-    ["场景文件", hasScene ? "已生成" : "等待生成"],
+    ["scene文件", hasScene ? "已生成" : "等待生成"],
   ].forEach(([label, value]) => {
     const term = document.createElement("dt");
     term.textContent = label;
@@ -203,7 +266,8 @@ function appendPaths(container, job) {
 }
 
 function appendFiles(container, job) {
-  if (!job.generated_files?.length) {
+  const sceneFiles = job.generated_files?.filter((file) => file.toLowerCase().endsWith(".scene")) || [];
+  if (!sceneFiles.length) {
     return;
   }
 
@@ -213,11 +277,11 @@ function appendFiles(container, job) {
   filesTitle.textContent = "生成文件";
   const list = document.createElement("ul");
 
-  job.generated_files.forEach((file) => {
+  sceneFiles.forEach((file) => {
     const row = document.createElement("li");
     const link = document.createElement("a");
     link.href = downloadUrl(job.id, file);
-    link.download = file.split("/").pop() || file;
+    link.download = "scene文件.scene";
     link.textContent = displayFileName(file);
     row.append(link);
     list.append(row);
@@ -225,6 +289,44 @@ function appendFiles(container, job) {
 
   files.append(filesTitle, list);
   container.append(files);
+}
+
+function inputImageFiles(job) {
+  return job.generated_files?.filter((file) => file.toLowerCase().startsWith("input_images/")) || [];
+}
+
+function appendInputImages(container, job) {
+  const images = inputImageFiles(job);
+  if (!images.length) {
+    return;
+  }
+
+  const section = document.createElement("section");
+  section.className = "job-images";
+
+  const title = document.createElement("h4");
+  title.textContent = "输入图片";
+
+  const grid = document.createElement("div");
+  grid.className = "job-image-grid";
+
+  images.forEach((file) => {
+    const link = document.createElement("a");
+    link.className = "job-image-link";
+    link.href = downloadUrl(job.id, file);
+    link.target = "_blank";
+    link.rel = "noreferrer";
+
+    const image = document.createElement("img");
+    image.src = downloadUrl(job.id, file);
+    image.alt = file.split("/").pop() || "输入图片";
+
+    link.append(image);
+    grid.append(link);
+  });
+
+  section.append(title, grid);
+  container.append(section);
 }
 
 function threeViewFile(job) {
@@ -481,16 +583,11 @@ function createJobCard(job, { detail = false } = {}) {
 
   const cardActions = document.createElement("div");
   cardActions.className = "job-actions";
-  const downloadAll = document.createElement("a");
-  downloadAll.className = "download-all";
-  downloadAll.href = downloadAllUrl(job.id);
-  downloadAll.download = `${job.id}_files.zip`;
-  downloadAll.textContent = "全部下载";
-  cardActions.append(status, downloadAll);
+  cardActions.append(status);
 
   item.append(body, cardActions);
   if (detail) {
-    appendThreeViewPreview(item, job);
+    appendInputImages(item, job);
   }
   appendFiles(item, job);
   appendOutput(item, job);
@@ -600,22 +697,35 @@ form.addEventListener("submit", async (event) => {
     return;
   }
 
+  const images = selectedImages();
+  const imageError = validateImages(images);
+  if (imageError) {
+    setFormState(imageError);
+    imageInput.focus();
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append("prompt", prompt);
+  images.forEach((image) => {
+    formData.append("images", image, image.name);
+  });
+
   setFormState("正在创建任务...", true);
 
   try {
     const response = await fetch("/api/jobs", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ prompt }),
+      body: formData,
     });
 
     if (!response.ok) {
-      throw new Error("需求提交被拒绝。");
+      throw new Error(await errorMessageFromResponse(response, "需求提交被拒绝。"));
     }
 
     promptInput.value = "";
+    imageInput.value = "";
+    renderImageList();
     const payload = await response.json();
     const detailPath = jobUrl(payload.job_id);
     setFormState(`任务 ${payload.job_id} 已创建。`);
@@ -626,6 +736,12 @@ form.addEventListener("submit", async (event) => {
   } finally {
     submitButton.disabled = false;
   }
+});
+
+imageInput.addEventListener("change", () => {
+  renderImageList();
+  const imageError = validateImages(selectedImages());
+  setFormState(imageError);
 });
 
 refreshButton.addEventListener("click", async () => {
@@ -652,5 +768,6 @@ document.addEventListener("click", (event) => {
 });
 
 window.addEventListener("popstate", loadCurrentRoute);
+window.addEventListener("beforeunload", clearImagePreviewUrls);
 
 loadCurrentRoute();

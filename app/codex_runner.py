@@ -4,13 +4,17 @@ import asyncio
 import json
 import os
 import shlex
+from collections.abc import Callable
 from pathlib import Path
 
 
-DEFAULT_TIMEOUT_SECONDS = 300
+DEFAULT_MAX_RUNTIME_SECONDS = 1800
+DEFAULT_IDLE_TIMEOUT_SECONDS = 600
 DEFAULT_CODEX_ARGS = "exec --skip-git-repo-check"
 DEFAULT_CODEX_HOME = Path("C:/Users/xqly/.codex")
 DEFAULT_OUTPUT_LIMIT_CHARS = 50_000
+POLL_SECONDS = 1.0
+GRACEFUL_SHUTDOWN_SECONDS = 10.0
 
 
 class CodexRunError(RuntimeError):
@@ -21,20 +25,40 @@ class CodexRunError(RuntimeError):
         self.output = output
 
 
-def _timeout_seconds() -> int:
-    raw_value = os.getenv("CODEX_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))
+def _positive_int_from_env(name: str, default: int) -> int:
+    raw_value = os.getenv(name, str(default))
     try:
         return max(1, int(raw_value))
     except ValueError:
-        return DEFAULT_TIMEOUT_SECONDS
+        return default
+
+
+def _max_runtime_seconds() -> int:
+    raw_value = os.getenv("CODEX_MAX_RUNTIME_SECONDS") or os.getenv("CODEX_TIMEOUT_SECONDS")
+    if raw_value is None:
+        return DEFAULT_MAX_RUNTIME_SECONDS
+
+    try:
+        return max(1, int(raw_value))
+    except ValueError:
+        return DEFAULT_MAX_RUNTIME_SECONDS
+
+
+def _idle_timeout_seconds() -> int | None:
+    raw_value = os.getenv("CODEX_IDLE_TIMEOUT_SECONDS")
+    if raw_value is None:
+        return DEFAULT_IDLE_TIMEOUT_SECONDS
+
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return DEFAULT_IDLE_TIMEOUT_SECONDS
+
+    return value if value > 0 else None
 
 
 def _output_limit_chars() -> int:
-    raw_value = os.getenv("CODEX_OUTPUT_LIMIT_CHARS", str(DEFAULT_OUTPUT_LIMIT_CHARS))
-    try:
-        return max(1_000, int(raw_value))
-    except ValueError:
-        return DEFAULT_OUTPUT_LIMIT_CHARS
+    return max(1_000, _positive_int_from_env("CODEX_OUTPUT_LIMIT_CHARS", DEFAULT_OUTPUT_LIMIT_CHARS))
 
 
 def _working_directory() -> Path:
@@ -79,7 +103,7 @@ def _codex_environment() -> dict[str, str]:
     return env
 
 
-def _command(prompt: str) -> list[str]:
+def _command(prompt: str, image_paths: list[str] | None = None) -> list[str]:
     command = _codex_command()
     args_json = os.getenv("CODEX_ARGS_JSON")
     if args_json:
@@ -92,7 +116,12 @@ def _command(prompt: str) -> list[str]:
         args = parsed_args
     else:
         args = shlex.split(os.getenv("CODEX_ARGS", DEFAULT_CODEX_ARGS))
-    return [command, *args, prompt]
+
+    image_args: list[str] = []
+    for image_path in image_paths or []:
+        image_args.extend(["--image", image_path])
+
+    return [command, *args, *image_args, prompt]
 
 
 def _decode_output(output: bytes) -> str:
@@ -116,12 +145,52 @@ def _combined_output(stdout: bytes, stderr: bytes) -> str:
     return _trim_output(stdout_text or stderr_text)
 
 
-async def run_codex(prompt: str) -> str:
+async def _read_stream(
+    stream: asyncio.StreamReader | None,
+    buffer: bytearray,
+    mark_activity: Callable[[], None],
+) -> None:
+    if stream is None:
+        return
+
+    while chunk := await stream.read(4096):
+        buffer.extend(chunk)
+        mark_activity()
+
+
+async def _stop_process(
+    process: asyncio.subprocess.Process,
+    *,
+    force: bool = False,
+) -> None:
+    if process.returncode is not None:
+        return
+
+    if force:
+        process.kill()
+        await process.wait()
+        return
+
+    process.terminate()
+    try:
+        await asyncio.wait_for(process.wait(), timeout=GRACEFUL_SHUTDOWN_SECONDS)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+
+
+async def run_codex(
+    prompt: str,
+    *,
+    image_paths: list[str] | None = None,
+    completion_check: Callable[[], bool] | None = None,
+    activity_snapshot: Callable[[], object] | None = None,
+) -> str:
     """Run Codex for a prompt and return captured output."""
 
     try:
         process = await asyncio.create_subprocess_exec(
-            *_command(prompt),
+            *_command(prompt, image_paths),
             cwd=str(_working_directory()),
             env=_codex_environment(),
             stdout=asyncio.subprocess.PIPE,
@@ -130,19 +199,67 @@ async def run_codex(prompt: str) -> str:
     except OSError as exc:
         raise CodexRunError(f"无法启动 Codex：{exc}") from exc
 
+    stdout_buffer = bytearray()
+    stderr_buffer = bytearray()
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+    last_activity_at = started_at
+    last_snapshot = activity_snapshot() if activity_snapshot else None
+
+    def mark_activity() -> None:
+        nonlocal last_activity_at
+        last_activity_at = loop.time()
+
+    readers = [
+        asyncio.create_task(_read_stream(process.stdout, stdout_buffer, mark_activity)),
+        asyncio.create_task(_read_stream(process.stderr, stderr_buffer, mark_activity)),
+    ]
+
+    completed_by_artifact = False
+    idle_timeout = _idle_timeout_seconds()
+    max_runtime = _max_runtime_seconds()
+
     try:
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(),
-            timeout=_timeout_seconds(),
-        )
-    except asyncio.TimeoutError as exc:
-        process.kill()
-        stdout, stderr = await process.communicate()
-        output = _combined_output(stdout, stderr)
-        raise CodexRunError("Codex 运行超时。", output=output) from exc
+        while True:
+            if completion_check and completion_check():
+                completed_by_artifact = True
+                await _stop_process(process)
+                break
+
+            try:
+                await asyncio.wait_for(process.wait(), timeout=POLL_SECONDS)
+                break
+            except asyncio.TimeoutError:
+                pass
+
+            now = loop.time()
+            if activity_snapshot:
+                snapshot = activity_snapshot()
+                if snapshot != last_snapshot:
+                    last_snapshot = snapshot
+                    last_activity_at = now
+
+            if idle_timeout is not None and now - last_activity_at >= idle_timeout:
+                await _stop_process(process, force=True)
+                output = _combined_output(bytes(stdout_buffer), bytes(stderr_buffer))
+                raise CodexRunError("Codex 长时间没有输出或文件进展。", output=output)
+
+            if now - started_at >= max_runtime:
+                await _stop_process(process, force=True)
+                output = _combined_output(bytes(stdout_buffer), bytes(stderr_buffer))
+                raise CodexRunError("Codex 运行超过最大时长。", output=output)
+    finally:
+        await asyncio.gather(*readers, return_exceptions=True)
+
+    stdout = bytes(stdout_buffer)
+    stderr = bytes(stderr_buffer)
+    output = _combined_output(stdout, stderr)
+
+    if completed_by_artifact:
+        completion_message = "Codex 已生成目标场景文件，已提前结束子进程。"
+        return "\n\n".join(item for item in (output, completion_message) if item)
 
     return_code = process.returncode
-    output = _combined_output(stdout, stderr)
     if return_code != 0:
         raise CodexRunError(f"Codex 退出状态码：{return_code}。", output=output)
 
