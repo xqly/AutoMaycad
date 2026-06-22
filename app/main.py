@@ -24,7 +24,12 @@ from pydantic import BaseModel, Field
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from .codex_runner import CodexRunError, run_codex
-from scripts.generate_maycad_shelf import ShelfSceneBuilder, generate_three_views, safe_name
+from scripts.generate_maycad_shelf import (
+    ShelfSceneBuilder,
+    generate_three_views,
+    remove_chinese_text,
+    safe_name,
+)
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -275,6 +280,11 @@ def build_maycad_prompt(
         - Do not write generated project files outside the task folder.
         - The original requirement is saved here:
           {requirement_path}
+        - The `.scene` file must not contain Chinese characters or Chinese
+          punctuation. Use English ASCII text for all metadata, object names,
+          labels, comments, CDATA text, and descriptions inside the `.scene`.
+        - If the user wrote the requirement in Chinese, translate any
+          human-readable `.scene` metadata to English before writing the file.
 
         MAYCAD modeling instructions:
         - Use the installed MAYCAD workflow if available: normalize the shelf
@@ -319,6 +329,29 @@ def generated_files(task_dir: Path) -> list[str]:
 
 def scene_files(task_dir: Path) -> list[str]:
     return [item for item in generated_files(task_dir) if item.lower().endswith(".scene")]
+
+
+def sanitize_scene_file(scene_path: Path) -> None:
+    try:
+        scene_text = scene_path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return
+
+    cleaned_scene_text = remove_chinese_text(scene_text)
+    if cleaned_scene_text != scene_text:
+        scene_path.write_text(cleaned_scene_text, encoding="utf-8")
+
+
+def sanitize_scene_files(task_dir: Path) -> None:
+    for relative_file in scene_files(task_dir):
+        scene_path = (task_dir / relative_file).resolve()
+        try:
+            scene_path.relative_to(task_dir)
+        except ValueError:
+            continue
+
+        if scene_path.is_file():
+            sanitize_scene_file(scene_path)
 
 
 def task_activity_snapshot(task_dir: Path) -> tuple[tuple[str, int, int], ...]:
@@ -382,6 +415,8 @@ def build_job_archive(task_dir: Path) -> io.BytesIO:
                 continue
 
             if source_path.is_file():
+                if source_path.suffix.lower() == ".scene":
+                    sanitize_scene_file(source_path)
                 zip_file.write(source_path, arcname=relative_file)
 
     archive.seek(0)
@@ -411,6 +446,7 @@ def recover_jobs_from_disk() -> None:
 
         job_id = task_dir.name
         requirement_path = task_dir / "shelf_requirements.md"
+        sanitize_scene_files(task_dir)
         scenes = scene_files(task_dir)
         scene_path = task_dir / scenes[0] if scenes else task_dir / f"{job_id}.scene"
         prompt = prompt_from_requirement(requirement_path)
@@ -463,8 +499,8 @@ def parse_shelf_spec(job_id: str, prompt: str) -> dict | None:
 
     return {
         "project_name": job_id,
-        "title": f"AutoMaycad 货架任务 {job_id}",
-        "description": "根据任务需求自动生成的铝型材货架场景。",
+        "title": f"AutoMaycad Shelf Task {job_id}",
+        "description": "Auto-generated aluminum profile shelf scene from the task requirements.",
         "finished_mm": {
             "length": length,
             "depth": depth,
@@ -565,6 +601,9 @@ async def execute_job(
             status = JobStatus.SUCCEEDED
             result = "\n\n".join(item for item in (result, fallback_result) if item)
             error = None
+
+    if scene_files(task_dir):
+        sanitize_scene_files(task_dir)
 
     async with jobs_lock:
         job = jobs[job_id]
@@ -690,7 +729,11 @@ async def download_job_file(job_id: str, file_path: str) -> FileResponse:
     if not resolved_path.is_file():
         raise HTTPException(status_code=404, detail="找不到该文件。")
 
-    download_name = "scene文件.scene" if resolved_path.suffix.lower() == ".scene" else resolved_path.name
+    is_scene_file = resolved_path.suffix.lower() == ".scene"
+    if is_scene_file:
+        sanitize_scene_file(resolved_path)
+
+    download_name = f"{job_id}.scene" if is_scene_file else resolved_path.name
     return FileResponse(resolved_path, filename=download_name)
 
 

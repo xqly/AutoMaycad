@@ -281,7 +281,7 @@ function appendFiles(container, job) {
     const row = document.createElement("li");
     const link = document.createElement("a");
     link.href = downloadUrl(job.id, file);
-    link.download = "scene文件.scene";
+    link.download = `${job.id}.scene`;
     link.textContent = displayFileName(file);
     row.append(link);
     list.append(row);
