@@ -30,6 +30,13 @@ def safe_name(name: str) -> str:
     return name.strip("._") or "maycad_shelf"
 
 
+CHINESE_TEXT_RE = re.compile(r"[\u3000-\u303f\uff00-\uffef\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+")
+
+
+def remove_chinese_text(text: str) -> str:
+    return CHINESE_TEXT_RE.sub("", text)
+
+
 def vec_xml(point: Sequence[float]) -> str:
     x, y, z = point
     return (
@@ -326,6 +333,8 @@ class ShelfSceneBuilder:
         }
 
     def scene_xml(self, title: str, description: str) -> str:
+        title = remove_chinese_text(title)
+        description = remove_chinese_text(description)
         scene = '<?xml version="1.0" encoding="UTF-8" ?>\n<scene>'
         scene += (
             "<version>14</version><software_branch_uid>win_maytec_maycad_64</software_branch_uid>"
@@ -448,7 +457,7 @@ def main() -> int:
     spec = json.loads(spec_path.read_text(encoding="utf-8-sig"))
     project_name = safe_name(spec.get("project_name", "maycad_shelf"))
     title = spec.get("title", project_name.replace("_", " ").title())
-    description = spec.get("description", "自动生成的铝型材展示货架。")
+    description = spec.get("description", "Auto-generated aluminum profile display shelf.")
 
     builder = ShelfSceneBuilder(spec)
     built = builder.build()
