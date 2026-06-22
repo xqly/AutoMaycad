@@ -234,17 +234,17 @@ class ShelfSceneBuilder:
         inset = half
 
         if length <= 2 * p or depth <= 2 * p or height <= 2 * p:
-            raise ValueError("finished dimensions are too small for the selected profile size")
+            raise ValueError("成品尺寸对于所选型材尺寸过小")
 
         x_positions = [inset + i * (length - 2 * inset) / bay_count for i in range(bay_count + 1)]
         y_positions = [inset, depth - inset]
         levels = self.shelf_levels(height, shelf_count)
         perimeter_levels = sorted(set([half, height - half, *levels]))
 
-        self.assumptions.append("finished_mm is treated as the finished outer shelf envelope")
-        self.assumptions.append("4040 aluminum profile is used for posts, shelf frames, and bracing")
-        self.assumptions.append("shelf boards are modeled as aluminum-colored 18 mm panel geometry")
-        self.assumptions.append("shelf levels are adjustable in concept; exact hole pattern and hardware are not modeled")
+        self.assumptions.append("finished_mm 按成品外包络尺寸处理")
+        self.assumptions.append("立柱、层框和支撑默认使用 4040 铝型材")
+        self.assumptions.append("层板按铝色 18 mm 板件几何建模")
+        self.assumptions.append("层高按可调设计处理，具体孔位和五金未建模")
 
         for x in x_positions:
             for y in y_positions:
@@ -391,29 +391,43 @@ def generate_three_views(spec: dict, built: dict, title: str) -> str:
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>{escape(title)} three views</title>
+<title>{escape(title)} 三视图</title>
 <style>
 body {{ font-family: Arial, sans-serif; margin: 24px; color: #1f2937; background: #f7f7f2; }}
-.sheet {{ max-width: 980px; margin: auto; background: white; border: 1px solid #d6d3c8; padding: 20px; }}
-.views {{ display: grid; grid-template-columns: 1fr; gap: 22px; }}
+.sheet {{ max-width: 760px; margin: auto; background: white; border: 1px solid #d6d3c8; padding: 18px; }}
+.views {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 0.74fr); gap: 12px 16px; align-items: start; }}
+.preview-view-front {{ grid-column: 1; grid-row: 1 / 3; }}
+.preview-view-top {{ grid-column: 2; grid-row: 1; }}
+.preview-view-side {{ grid-column: 2; grid-row: 2; }}
 .view h2 {{ font-size: 16px; margin: 0 0 8px; }}
-svg {{ width: 100%; height: auto; background: #fbfaf6; border: 1px solid #ddd8ca; }}
+.view svg {{ display: block; max-width: 100%; margin: 0 auto; background: #fbfaf6; border: 1px solid #ddd8ca; }}
+.preview-view-front svg {{ width: auto; height: 420px; }}
+.preview-view-top svg {{ width: 100%; height: auto; }}
+.preview-view-side svg {{ width: auto; height: 300px; }}
 .line {{ fill: none; stroke: #1f2937; stroke-width: 2; }}
 .division {{ stroke: #6b7280; stroke-width: 1.4; stroke-dasharray: 7 5; }}
 .shelf {{ stroke: #4b5563; stroke-width: 2.2; }}
 .note {{ color: #4b5563; font-size: 14px; line-height: 1.5; }}
+@media (max-width: 720px) {{
+  .views {{ grid-template-columns: 1fr; }}
+  .preview-view-front,
+  .preview-view-top,
+  .preview-view-side {{ grid-column: auto; grid-row: auto; }}
+  .preview-view-front svg {{ height: 360px; }}
+  .preview-view-side svg {{ height: 300px; }}
+}}
 </style>
 </head>
 <body>
 <main class="sheet">
 <h1>{escape(title)}</h1>
-<p class="note">Finished size: {fmt(length)} x {fmt(depth)} x {fmt(height)} mm. Shelves: {len(levels)}. Nominal load: {fmt(built["load_per_shelf_kg"])} kg per shelf.</p>
+<p class="note">成品尺寸：{fmt(length)} x {fmt(depth)} x {fmt(height)} mm。层数：{len(levels)}。额定载荷：{fmt(built["load_per_shelf_kg"])} kg/层。</p>
 <section class="views">
-<div class="view"><h2>Front view</h2><svg viewBox="-20 -28 {fmt(front_w + 80)} {fmt(front_h + 56)}">{''.join(front)}<text x="0" y="-8">L {fmt(length)} mm</text><text x="{fmt(front_w + 8)}" y="{fmt(front_h / 2)}">H {fmt(height)} mm</text></svg></div>
-<div class="view"><h2>Top view</h2><svg viewBox="-20 -28 {fmt(front_w + 80)} {fmt(top_h + 56)}">{''.join(top)}<text x="0" y="-8">L {fmt(length)} mm</text><text x="{fmt(front_w + 8)}" y="{fmt(top_h / 2)}">D {fmt(depth)} mm</text></svg></div>
-<div class="view"><h2>Side view</h2><svg viewBox="-20 -28 {fmt(side_w + 80)} {fmt(side_h + 56)}">{''.join(side)}<text x="0" y="-8">D {fmt(depth)} mm</text><text x="{fmt(side_w + 8)}" y="{fmt(side_h / 2)}">H {fmt(height)} mm</text></svg></div>
+<div class="view preview-view-front"><h2>正视图</h2><svg viewBox="-20 -28 {fmt(front_w + 80)} {fmt(front_h + 56)}">{''.join(front)}<text x="0" y="-8">长 {fmt(length)} mm</text><text x="{fmt(front_w + 8)}" y="{fmt(front_h / 2)}">高 {fmt(height)} mm</text></svg></div>
+<div class="view preview-view-top"><h2>俯视图</h2><svg viewBox="-20 -28 {fmt(front_w + 80)} {fmt(top_h + 56)}">{''.join(top)}<text x="0" y="-8">长 {fmt(length)} mm</text><text x="{fmt(front_w + 8)}" y="{fmt(top_h / 2)}">深 {fmt(depth)} mm</text></svg></div>
+<div class="view preview-view-side"><h2>侧视图</h2><svg viewBox="-20 -28 {fmt(side_w + 80)} {fmt(side_h + 56)}">{''.join(side)}<text x="0" y="-8">深 {fmt(depth)} mm</text><text x="{fmt(side_w + 8)}" y="{fmt(side_h / 2)}">高 {fmt(height)} mm</text></svg></div>
 </section>
-<h2>Assumptions</h2>
+<h2>建模假设</h2>
 <ul class="note">{assumptions}</ul>
 </main>
 </body>
@@ -434,7 +448,7 @@ def main() -> int:
     spec = json.loads(spec_path.read_text(encoding="utf-8-sig"))
     project_name = safe_name(spec.get("project_name", "maycad_shelf"))
     title = spec.get("title", project_name.replace("_", " ").title())
-    description = spec.get("description", "Generated aluminum-profile display shelf.")
+    description = spec.get("description", "自动生成的铝型材展示货架。")
 
     builder = ShelfSceneBuilder(spec)
     built = builder.build()

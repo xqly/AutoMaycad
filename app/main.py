@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import re
 import textwrap
+import zipfile
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -13,7 +15,7 @@ from typing import Literal
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -26,6 +28,7 @@ PROJECT_DIR = APP_DIR.parent
 STATIC_DIR = APP_DIR / "static"
 TASKS_DIR = Path(os.getenv("TASKS_DIR") or PROJECT_DIR / "tasks").expanduser().resolve()
 MAX_PROMPT_LENGTH = 20_000
+HIDDEN_GENERATED_FILES = {"codex_prompt.md", "shelf_requirements.md"}
 
 
 class JobStatus(StrEnum):
@@ -79,7 +82,7 @@ class JobResponse(BaseModel):
     generated_files: list[str] | None
 
 
-app = FastAPI(title="AutoMaycad Shelf Tasks")
+app = FastAPI(title="AutoMaycad 货架任务")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 jobs: dict[str, Job] = {}
@@ -172,12 +175,82 @@ def generated_files(task_dir: Path) -> list[str]:
     files: list[str] = []
     for path in task_dir.rglob("*"):
         if path.is_file():
-            files.append(path.relative_to(task_dir).as_posix())
+            relative_path = path.relative_to(task_dir).as_posix()
+            if relative_path not in HIDDEN_GENERATED_FILES:
+                files.append(relative_path)
     return sorted(files)
 
 
 def scene_files(task_dir: Path) -> list[str]:
     return [item for item in generated_files(task_dir) if item.lower().endswith(".scene")]
+
+
+def refresh_job_files(job: Job) -> None:
+    job.generated_files = generated_files(Path(job.task_dir))
+
+
+def job_to_response(job: Job) -> JobResponse:
+    refresh_job_files(job)
+    return JobResponse(**asdict(job))
+
+
+def build_job_archive(task_dir: Path) -> io.BytesIO:
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, mode="w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        for relative_file in generated_files(task_dir):
+            source_path = (task_dir / relative_file).resolve()
+            try:
+                source_path.relative_to(task_dir)
+            except ValueError:
+                continue
+
+            if source_path.is_file():
+                zip_file.write(source_path, arcname=relative_file)
+
+    archive.seek(0)
+    return archive
+
+
+def prompt_from_requirement(requirement_path: Path) -> str:
+    if not requirement_path.exists():
+        return ""
+
+    text = requirement_path.read_text(encoding="utf-8", errors="replace")
+    match = re.search(r"```text\s*(.*?)\s*```", text, re.S)
+    return match.group(1).strip() if match else text.strip()
+
+
+def timestamp_for_path(path: Path) -> str:
+    return datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
+
+
+def recover_jobs_from_disk() -> None:
+    if not TASKS_DIR.exists():
+        return
+
+    for task_dir in sorted(TASKS_DIR.iterdir()):
+        if not task_dir.is_dir() or task_dir.name in jobs:
+            continue
+
+        job_id = task_dir.name
+        requirement_path = task_dir / "shelf_requirements.md"
+        scenes = scene_files(task_dir)
+        scene_path = task_dir / scenes[0] if scenes else task_dir / f"{job_id}.scene"
+        prompt = prompt_from_requirement(requirement_path)
+        files = generated_files(task_dir)
+        newest_mtime = max((path.stat().st_mtime for path in task_dir.rglob("*") if path.is_file()), default=task_dir.stat().st_mtime)
+
+        jobs[job_id] = Job(
+            id=job_id,
+            prompt_preview=preview_prompt(prompt) if prompt else f"已恢复任务 {job_id}",
+            task_dir=str(task_dir.resolve()),
+            requirement_path=str(requirement_path.resolve()),
+            scene_path=str(scene_path.resolve()),
+            status=JobStatus.SUCCEEDED if scenes else JobStatus.FAILED,
+            created_at=timestamp_for_path(task_dir),
+            finished_at=datetime.fromtimestamp(newest_mtime, UTC).isoformat(),
+            generated_files=files,
+        )
 
 
 def parse_number_after_label(prompt: str, labels: tuple[str, ...]) -> float | None:
@@ -213,8 +286,8 @@ def parse_shelf_spec(job_id: str, prompt: str) -> dict | None:
 
     return {
         "project_name": job_id,
-        "title": f"AutoMaycad Shelf Task {job_id}",
-        "description": "Auto-generated aluminum-profile shelf scene from task prompt.",
+        "title": f"AutoMaycad 货架任务 {job_id}",
+        "description": "根据任务需求自动生成的铝型材货架场景。",
         "finished_mm": {
             "length": length,
             "depth": depth,
@@ -261,7 +334,7 @@ def run_local_shelf_generator(job_id: str, prompt: str, task_dir: Path) -> str |
         "generator": "local_fallback",
     }
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
-    return f"Local MAYCAD shelf generator wrote {scene_path}."
+    return f"本地 MAYCAD 货架生成器已写入 {scene_path}。"
 
 
 async def execute_job(job_id: str, user_prompt: str, codex_prompt: str) -> None:
@@ -285,7 +358,7 @@ async def execute_job(job_id: str, user_prompt: str, codex_prompt: str) -> None:
             status = JobStatus.SUCCEEDED
         else:
             status = JobStatus.FAILED
-            error = "Codex completed, but no .scene file was found in the task folder."
+            error = "Codex 已完成，但任务文件夹中未找到 .scene 文件。"
 
     if status == JobStatus.FAILED and not scene_files(task_dir):
         fallback_result = run_local_shelf_generator(job_id, user_prompt, task_dir)
@@ -303,8 +376,24 @@ async def execute_job(job_id: str, user_prompt: str, codex_prompt: str) -> None:
         job.generated_files = generated_files(Path(job.task_dir))
 
 
+@app.on_event("startup")
+async def load_recovered_jobs() -> None:
+    async with jobs_lock:
+        recover_jobs_from_disk()
+
+
 @app.get("/")
 async def index() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/jobs")
+async def jobs_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/jobs/{job_id}")
+async def job_page(job_id: str) -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
@@ -312,13 +401,13 @@ async def index() -> FileResponse:
 async def create_job(payload: CreateJobRequest) -> CreateJobResponse:
     prompt = payload.prompt.strip()
     if not prompt:
-        raise HTTPException(status_code=422, detail="Prompt cannot be empty.")
+        raise HTTPException(status_code=422, detail="需求不能为空。")
 
     job_id = uuid4().hex
     try:
         task_dir, requirement_path, scene_path = create_task_files(job_id, prompt)
     except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not create task folder: {exc}") from exc
+        raise HTTPException(status_code=500, detail=f"无法创建任务文件夹：{exc}") from exc
 
     codex_prompt = build_maycad_prompt(
         job_id=job_id,
@@ -359,7 +448,83 @@ async def create_job(payload: CreateJobRequest) -> CreateJobResponse:
 async def list_jobs() -> list[JobResponse]:
     async with jobs_lock:
         newest_first = sorted(jobs.values(), key=lambda item: item.created_at, reverse=True)
-        return [JobResponse(**asdict(job)) for job in newest_first]
+        return [job_to_response(job) for job in newest_first]
+
+
+@app.get("/api/jobs/{job_id}/files/{file_path:path}")
+async def download_job_file(job_id: str, file_path: str) -> FileResponse:
+    async with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="找不到该任务。")
+        task_dir = Path(job.task_dir).resolve()
+
+    requested_path = Path(file_path)
+    normalized_file_path = requested_path.as_posix()
+    if (
+        not file_path
+        or requested_path.is_absolute()
+        or normalized_file_path in HIDDEN_GENERATED_FILES
+    ):
+        raise HTTPException(status_code=400, detail="文件路径无效。")
+
+    resolved_path = (task_dir / requested_path).resolve()
+    try:
+        resolved_path.relative_to(task_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="文件路径无效。") from exc
+
+    if not resolved_path.is_file():
+        raise HTTPException(status_code=404, detail="找不到该文件。")
+
+    return FileResponse(resolved_path, filename=resolved_path.name)
+
+
+@app.get("/api/jobs/{job_id}/download-all")
+async def download_all_job_files(job_id: str) -> StreamingResponse:
+    async with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="找不到该任务。")
+        task_dir = Path(job.task_dir).resolve()
+
+    archive = build_job_archive(task_dir)
+    filename = f"{job_id}_files.zip"
+    return StreamingResponse(
+        archive,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/jobs/{job_id}/preview/{file_path:path}")
+async def preview_job_file(job_id: str, file_path: str) -> FileResponse:
+    async with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="找不到该任务。")
+        task_dir = Path(job.task_dir).resolve()
+
+    requested_path = Path(file_path)
+    normalized_file_path = requested_path.as_posix()
+    if (
+        not file_path
+        or requested_path.is_absolute()
+        or normalized_file_path in HIDDEN_GENERATED_FILES
+        or not normalized_file_path.lower().endswith(".html")
+    ):
+        raise HTTPException(status_code=400, detail="预览路径无效。")
+
+    resolved_path = (task_dir / requested_path).resolve()
+    try:
+        resolved_path.relative_to(task_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="预览路径无效。") from exc
+
+    if not resolved_path.is_file() or normalized_file_path not in generated_files(task_dir):
+        raise HTTPException(status_code=404, detail="找不到预览文件。")
+
+    return FileResponse(resolved_path, media_type="text/html")
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobResponse)
@@ -367,5 +532,5 @@ async def get_job(job_id: str) -> JobResponse:
     async with jobs_lock:
         job = jobs.get(job_id)
         if job is None:
-            raise HTTPException(status_code=404, detail="Job not found.")
-        return JobResponse(**asdict(job))
+            raise HTTPException(status_code=404, detail="找不到该任务。")
+        return job_to_response(job)

@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AutoMaycad Shelf Tasks</title>
+    <title>AutoMaycad 货架任务</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
@@ -11,32 +11,50 @@
       <section class="workspace" aria-labelledby="app-title">
         <div class="header">
           <div>
-            <p class="eyebrow">MAYCAD scene generator</p>
-            <h1 id="app-title">AutoMaycad Shelf Tasks</h1>
+            <p class="eyebrow">MAYCAD 场景生成器</p>
+            <h1 id="app-title">AutoMaycad 货架任务</h1>
           </div>
-          <button class="icon-button" id="refresh" type="button" aria-label="Refresh jobs" title="Refresh jobs">
-            <span aria-hidden="true">&#8635;</span>
-          </button>
+          <div class="header-actions">
+            <nav class="top-nav" aria-label="Primary">
+              <a href="/" data-route>新建任务</a>
+              <a href="/jobs" data-route>任务列表</a>
+            </nav>
+            <button class="icon-button" id="refresh" type="button" aria-label="刷新任务" title="刷新任务">
+              <span aria-hidden="true">&#8635;</span>
+            </button>
+          </div>
         </div>
 
-        <form id="prompt-form" class="composer">
-          <label for="prompt">Shelf requirement</label>
-          <textarea id="prompt" name="prompt" rows="8" maxlength="20000" placeholder="Example: 2000 mm long, 600 mm deep, 1800 mm high aluminum profile shelf, 4 levels, 3 bays, MDF panels..." required></textarea>
+        <form id="prompt-form" class="composer app-view">
+          <label for="prompt">货架需求</label>
+          <textarea id="prompt" name="prompt" rows="8" maxlength="20000" placeholder="示例：长 2000 mm、深 600 mm、高 1800 mm 的铝型材货架，4 层，3 跨，中密度纤维板层板..." required></textarea>
           <div class="actions">
             <p id="form-status" role="status" aria-live="polite"></p>
-            <button id="submit" type="submit">Create Task</button>
+            <button id="submit" type="submit">创建任务</button>
           </div>
         </form>
 
-        <section class="jobs-panel" aria-labelledby="jobs-title">
+        <section id="jobs-view" class="jobs-panel app-view" aria-labelledby="jobs-title" hidden>
           <div class="jobs-header">
-            <h2 id="jobs-title">Jobs</h2>
+            <h2 id="jobs-title">任务列表</h2>
             <span id="job-count">0</span>
           </div>
           <div id="jobs" class="jobs" aria-live="polite"></div>
         </section>
+
+        <section id="job-view" class="jobs-panel app-view" aria-labelledby="job-title" hidden>
+          <div class="jobs-header">
+            <div>
+              <p class="eyebrow">任务详情</p>
+              <h2 id="job-title">任务</h2>
+            </div>
+            <a class="text-link" href="/jobs" data-route>全部任务</a>
+          </div>
+          <div id="job-detail" class="jobs" aria-live="polite"></div>
+        </section>
       </section>
     </main>
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
     <script src="/static/app.js"></script>
   </body>
 </html>

@@ -86,9 +86,9 @@ def _command(prompt: str) -> list[str]:
         try:
             parsed_args = json.loads(args_json)
         except json.JSONDecodeError as exc:
-            raise CodexRunError("CODEX_ARGS_JSON is not valid JSON.") from exc
+            raise CodexRunError("CODEX_ARGS_JSON 不是有效的 JSON。") from exc
         if not isinstance(parsed_args, list) or not all(isinstance(item, str) for item in parsed_args):
-            raise CodexRunError("CODEX_ARGS_JSON must be a JSON array of strings.")
+            raise CodexRunError("CODEX_ARGS_JSON 必须是字符串数组。")
         args = parsed_args
     else:
         args = shlex.split(os.getenv("CODEX_ARGS", DEFAULT_CODEX_ARGS))
@@ -105,14 +105,14 @@ def _trim_output(output: str) -> str:
         return output
 
     omitted = len(output) - limit
-    return f"{output[:limit]}\n\n[output truncated: {omitted} characters omitted]"
+    return f"{output[:limit]}\n\n[输出已截断：省略 {omitted} 个字符]"
 
 
 def _combined_output(stdout: bytes, stderr: bytes) -> str:
     stdout_text = _decode_output(stdout)
     stderr_text = _decode_output(stderr)
     if stdout_text and stderr_text:
-        return _trim_output(f"{stdout_text}\n\n[stderr]\n{stderr_text}")
+        return _trim_output(f"{stdout_text}\n\n[错误输出]\n{stderr_text}")
     return _trim_output(stdout_text or stderr_text)
 
 
@@ -128,7 +128,7 @@ async def run_codex(prompt: str) -> str:
             stderr=asyncio.subprocess.PIPE,
         )
     except OSError as exc:
-        raise CodexRunError(f"Could not start Codex: {exc}") from exc
+        raise CodexRunError(f"无法启动 Codex：{exc}") from exc
 
     try:
         stdout, stderr = await asyncio.wait_for(
@@ -139,11 +139,11 @@ async def run_codex(prompt: str) -> str:
         process.kill()
         stdout, stderr = await process.communicate()
         output = _combined_output(stdout, stderr)
-        raise CodexRunError("Codex timed out.", output=output) from exc
+        raise CodexRunError("Codex 运行超时。", output=output) from exc
 
     return_code = process.returncode
     output = _combined_output(stdout, stderr)
     if return_code != 0:
-        raise CodexRunError(f"Codex exited with status {return_code}.", output=output)
+        raise CodexRunError(f"Codex 退出状态码：{return_code}。", output=output)
 
-    return output or "(Codex completed without output.)"
+    return output or "（Codex 已完成，没有输出。）"
