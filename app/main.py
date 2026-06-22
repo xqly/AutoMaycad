@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import textwrap
 import time
 import zipfile
@@ -36,6 +37,7 @@ APP_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = APP_DIR.parent
 STATIC_DIR = APP_DIR / "static"
 TASKS_DIR = Path(os.getenv("TASKS_DIR") or PROJECT_DIR / "tasks").expanduser().resolve()
+JOBS_DB_PATH = Path(os.getenv("JOBS_DB_PATH") or TASKS_DIR / "jobs.sqlite3").expanduser().resolve()
 MAX_PROMPT_LENGTH = 20_000
 MAX_IMAGE_COUNT = 8
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
@@ -104,8 +106,169 @@ class JobResponse(BaseModel):
 app = FastAPI(title="AutoMaycad 货架任务")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-jobs: dict[str, Job] = {}
 jobs_lock = asyncio.Lock()
+
+
+def connect_db() -> sqlite3.Connection:
+    JOBS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(JOBS_DB_PATH)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA journal_mode = WAL")
+    return connection
+
+
+def init_jobs_db() -> None:
+    with connect_db() as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY,
+                prompt_preview TEXT NOT NULL,
+                task_dir TEXT NOT NULL,
+                requirement_path TEXT NOT NULL,
+                scene_path TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                result TEXT,
+                error TEXT,
+                generated_files TEXT NOT NULL DEFAULT '[]',
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at)")
+
+
+def encode_generated_files(files: list[str] | None) -> str:
+    return json.dumps(files or [], ensure_ascii=False)
+
+
+def decode_generated_files(value: str | None) -> list[str]:
+    if not value:
+        return []
+
+    try:
+        files = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+
+    if not isinstance(files, list):
+        return []
+    return [item for item in files if isinstance(item, str)]
+
+
+def job_from_row(row: sqlite3.Row) -> Job:
+    return Job(
+        id=row["id"],
+        prompt_preview=row["prompt_preview"],
+        task_dir=row["task_dir"],
+        requirement_path=row["requirement_path"],
+        scene_path=row["scene_path"],
+        status=JobStatus(row["status"]),
+        created_at=row["created_at"],
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
+        result=row["result"],
+        error=row["error"],
+        generated_files=decode_generated_files(row["generated_files"]),
+    )
+
+
+def insert_job(job: Job) -> None:
+    with connect_db() as connection:
+        connection.execute(
+            """
+            INSERT INTO jobs (
+                id,
+                prompt_preview,
+                task_dir,
+                requirement_path,
+                scene_path,
+                status,
+                created_at,
+                started_at,
+                finished_at,
+                result,
+                error,
+                generated_files,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job.id,
+                job.prompt_preview,
+                job.task_dir,
+                job.requirement_path,
+                job.scene_path,
+                job.status.value,
+                job.created_at,
+                job.started_at,
+                job.finished_at,
+                job.result,
+                job.error,
+                encode_generated_files(job.generated_files),
+                utc_now(),
+            ),
+        )
+
+
+def save_job(job: Job) -> None:
+    with connect_db() as connection:
+        connection.execute(
+            """
+            UPDATE jobs
+            SET prompt_preview = ?,
+                task_dir = ?,
+                requirement_path = ?,
+                scene_path = ?,
+                status = ?,
+                created_at = ?,
+                started_at = ?,
+                finished_at = ?,
+                result = ?,
+                error = ?,
+                generated_files = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                job.prompt_preview,
+                job.task_dir,
+                job.requirement_path,
+                job.scene_path,
+                job.status.value,
+                job.created_at,
+                job.started_at,
+                job.finished_at,
+                job.result,
+                job.error,
+                encode_generated_files(job.generated_files),
+                utc_now(),
+                job.id,
+            ),
+        )
+
+
+def get_job_from_db(job_id: str) -> Job | None:
+    with connect_db() as connection:
+        row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    return job_from_row(row) if row else None
+
+
+def list_jobs_from_db() -> list[Job]:
+    with connect_db() as connection:
+        rows = connection.execute("SELECT * FROM jobs ORDER BY created_at DESC").fetchall()
+    return [job_from_row(row) for row in rows]
+
+
+def job_exists(job_id: str) -> bool:
+    with connect_db() as connection:
+        row = connection.execute("SELECT 1 FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    return row is not None
 
 
 def utc_now() -> str:
@@ -395,12 +558,16 @@ def task_completion_check(task_dir: Path, stable_seconds: float = 5.0) -> Callab
     return check
 
 
-def refresh_job_files(job: Job) -> None:
-    job.generated_files = generated_files(Path(job.task_dir))
+def refresh_job_files(job: Job) -> bool:
+    files = generated_files(Path(job.task_dir))
+    if files == (job.generated_files or []):
+        return False
+
+    job.generated_files = files
+    return True
 
 
 def job_to_response(job: Job) -> JobResponse:
-    refresh_job_files(job)
     return JobResponse(**asdict(job))
 
 
@@ -441,7 +608,7 @@ def recover_jobs_from_disk() -> None:
         return
 
     for task_dir in sorted(TASKS_DIR.iterdir()):
-        if not task_dir.is_dir() or task_dir.name in jobs:
+        if not task_dir.is_dir() or job_exists(task_dir.name):
             continue
 
         job_id = task_dir.name
@@ -453,7 +620,7 @@ def recover_jobs_from_disk() -> None:
         files = generated_files(task_dir)
         newest_mtime = max((path.stat().st_mtime for path in task_dir.rglob("*") if path.is_file()), default=task_dir.stat().st_mtime)
 
-        jobs[job_id] = Job(
+        insert_job(Job(
             id=job_id,
             prompt_preview=preview_prompt(prompt) if prompt else f"已恢复任务 {job_id}",
             task_dir=str(task_dir.resolve()),
@@ -463,7 +630,26 @@ def recover_jobs_from_disk() -> None:
             created_at=timestamp_for_path(task_dir),
             finished_at=datetime.fromtimestamp(newest_mtime, UTC).isoformat(),
             generated_files=files,
-        )
+        ))
+
+
+def reconcile_jobs_after_startup() -> None:
+    for job in list_jobs_from_db():
+        task_dir = Path(job.task_dir)
+        if task_dir.exists():
+            sanitize_scene_files(task_dir)
+            refresh_job_files(job)
+
+        if job.status not in {JobStatus.QUEUED, JobStatus.RUNNING}:
+            save_job(job)
+            continue
+
+        scenes = scene_files(task_dir)
+        job.status = JobStatus.SUCCEEDED if scenes else JobStatus.FAILED
+        job.finished_at = job.finished_at or utc_now()
+        job.error = None if scenes else "服务重启，后台任务未继续运行。请重新创建任务。"
+        refresh_job_files(job)
+        save_job(job)
 
 
 def parse_number_after_label(prompt: str, labels: tuple[str, ...]) -> float | None:
@@ -557,10 +743,13 @@ async def execute_job(
     image_paths: list[Path] | None = None,
 ) -> None:
     async with jobs_lock:
-        job = jobs[job_id]
+        job = get_job_from_db(job_id)
+        if job is None:
+            return
         job.status = JobStatus.RUNNING
         job.started_at = utc_now()
         task_dir = Path(job.task_dir)
+        save_job(job)
 
     result: str | None = None
     error: str | None = None
@@ -606,18 +795,23 @@ async def execute_job(
         sanitize_scene_files(task_dir)
 
     async with jobs_lock:
-        job = jobs[job_id]
+        job = get_job_from_db(job_id)
+        if job is None:
+            return
         job.status = status
         job.finished_at = utc_now()
         job.result = result
         job.error = error
         job.generated_files = generated_files(Path(job.task_dir))
+        save_job(job)
 
 
 @app.on_event("startup")
 async def load_recovered_jobs() -> None:
     async with jobs_lock:
+        init_jobs_db()
         recover_jobs_from_disk()
+        reconcile_jobs_after_startup()
 
 
 @app.get("/")
@@ -681,8 +875,12 @@ async def create_job(request: Request) -> CreateJobResponse:
         generated_files=generated_files(task_dir),
     )
 
-    async with jobs_lock:
-        jobs[job_id] = job
+    try:
+        async with jobs_lock:
+            insert_job(job)
+    except sqlite3.Error as exc:
+        shutil.rmtree(task_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=f"无法写入任务数据库：{exc}") from exc
 
     asyncio.create_task(execute_job(job_id, prompt, codex_prompt, image_paths))
 
@@ -699,14 +897,19 @@ async def create_job(request: Request) -> CreateJobResponse:
 @app.get("/api/jobs", response_model=list[JobResponse])
 async def list_jobs() -> list[JobResponse]:
     async with jobs_lock:
-        newest_first = sorted(jobs.values(), key=lambda item: item.created_at, reverse=True)
-        return [job_to_response(job) for job in newest_first]
+        jobs = list_jobs_from_db()
+        responses: list[JobResponse] = []
+        for job in jobs:
+            if refresh_job_files(job):
+                save_job(job)
+            responses.append(job_to_response(job))
+        return responses
 
 
 @app.get("/api/jobs/{job_id}/files/{file_path:path}")
 async def download_job_file(job_id: str, file_path: str) -> FileResponse:
     async with jobs_lock:
-        job = jobs.get(job_id)
+        job = get_job_from_db(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="找不到该任务。")
         task_dir = Path(job.task_dir).resolve()
@@ -740,7 +943,7 @@ async def download_job_file(job_id: str, file_path: str) -> FileResponse:
 @app.get("/api/jobs/{job_id}/download-all")
 async def download_all_job_files(job_id: str) -> StreamingResponse:
     async with jobs_lock:
-        job = jobs.get(job_id)
+        job = get_job_from_db(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="找不到该任务。")
         task_dir = Path(job.task_dir).resolve()
@@ -757,7 +960,7 @@ async def download_all_job_files(job_id: str) -> StreamingResponse:
 @app.get("/api/jobs/{job_id}/preview/{file_path:path}")
 async def preview_job_file(job_id: str, file_path: str) -> FileResponse:
     async with jobs_lock:
-        job = jobs.get(job_id)
+        job = get_job_from_db(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="找不到该任务。")
         task_dir = Path(job.task_dir).resolve()
@@ -787,7 +990,9 @@ async def preview_job_file(job_id: str, file_path: str) -> FileResponse:
 @app.get("/api/jobs/{job_id}", response_model=JobResponse)
 async def get_job(job_id: str) -> JobResponse:
     async with jobs_lock:
-        job = jobs.get(job_id)
+        job = get_job_from_db(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="找不到该任务。")
+        if refresh_job_files(job):
+            save_job(job)
         return job_to_response(job)

@@ -13,8 +13,8 @@ The UI shows whether each job is queued, running, succeeded, or failed. It also
 shows the task folder, expected scene path, uploaded images, generated files,
 and captured Codex output when available.
 
-Jobs are stored in memory, so job history is cleared when the server restarts.
-Generated task folders remain on disk.
+Jobs are stored persistently in a SQLite database at `tasks/jobs.sqlite3` by
+default. Generated task folders remain on disk under `tasks/<task-id>/`.
 
 ## Setup
 
@@ -65,6 +65,7 @@ $env:CODEX_OUTPUT_LIMIT_CHARS = "50000"
 $env:CODEX_WORKDIR = "C:\path\to\workspace"
 $env:CODEX_HOME = "C:\Users\xqly\.codex"
 $env:TASKS_DIR = "C:\path\to\workspace\tasks"
+$env:JOBS_DB_PATH = "C:\path\to\workspace\tasks\jobs.sqlite3"
 uvicorn app.main:app --reload
 ```
 
