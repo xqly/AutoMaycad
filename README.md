@@ -1,10 +1,19 @@
-# Codex Prompt Runner
+# AutoMaycad Shelf Tasks
 
-A small FastAPI site for submitting prompts to Codex asynchronously.
+A small FastAPI site for turning shelf/rack requirements into asynchronous
+Codex tasks that generate MAYCAD `.scene` files.
 
-The browser submits a prompt, the API queues a background job, and the server runs Codex. The UI shows whether each job is queued, running, succeeded, or failed, and displays captured Codex output when the job finishes.
+The browser submits a shelf requirement, the API creates a task ID and a folder
+under `tasks/<task-id>/`, then starts Codex in the background. Codex receives a
+MAYCAD-specific prompt that requires the final scene file to be written into
+that task folder.
+
+The UI shows whether each job is queued, running, succeeded, or failed. It also
+shows the task folder, expected scene path, generated files, and captured Codex
+output when available.
 
 Jobs are stored in memory, so job history is cleared when the server restarts.
+Generated task folders remain on disk.
 
 ## Setup
 
@@ -53,6 +62,7 @@ $env:CODEX_TIMEOUT_SECONDS = "900"
 $env:CODEX_OUTPUT_LIMIT_CHARS = "50000"
 $env:CODEX_WORKDIR = "C:\path\to\workspace"
 $env:CODEX_HOME = "C:\Users\xqly\.codex"
+$env:TASKS_DIR = "C:\path\to\workspace\tasks"
 uvicorn app.main:app --reload
 ```
 
@@ -63,6 +73,11 @@ For exact argument control, especially on Windows, you can use JSON instead:
 ```powershell
 $env:CODEX_ARGS_JSON = '["exec", "--skip-git-repo-check"]'
 ```
+
+If Codex fails with `attempt to write a readonly database` or `access denied`
+under `C:\Users\xqly\.codex`, start Uvicorn from a normal user terminal rather
+than a sandboxed process, or set `CODEX_HOME` to a writable Codex state folder
+that has valid authentication.
 
 ## Security note
 

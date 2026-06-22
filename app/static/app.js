@@ -8,6 +8,14 @@ const refreshButton = document.querySelector("#refresh");
 
 const activeStatuses = new Set(["queued", "running"]);
 
+function pathLabel(path) {
+  if (!path) {
+    return "";
+  }
+
+  return path.replaceAll("\\", "/");
+}
+
 function formatDate(value) {
   if (!value) {
     return "";
@@ -39,6 +47,9 @@ function renderJobs(jobs) {
       item.className = "job";
 
       const body = document.createElement("div");
+      const title = document.createElement("h3");
+      title.textContent = `Task ${job.id}`;
+
       const preview = document.createElement("p");
       preview.textContent = job.prompt_preview || "(empty prompt)";
 
@@ -52,13 +63,41 @@ function renderJobs(jobs) {
         .filter(Boolean)
         .join(" | ");
 
-      body.append(preview, meta);
+      const paths = document.createElement("dl");
+      paths.className = "job-paths";
+      [
+        ["Folder", job.task_dir],
+        ["Scene", job.scene_path],
+      ].forEach(([label, value]) => {
+        const term = document.createElement("dt");
+        term.textContent = label;
+        const description = document.createElement("dd");
+        description.textContent = pathLabel(value);
+        paths.append(term, description);
+      });
+
+      body.append(title, preview, paths, meta);
 
       const status = document.createElement("span");
       status.className = `status status-${job.status}`;
       status.textContent = job.status;
 
       item.append(body, status);
+
+      if (job.generated_files?.length) {
+        const files = document.createElement("section");
+        files.className = "job-files";
+        const filesTitle = document.createElement("h4");
+        filesTitle.textContent = "Generated files";
+        const list = document.createElement("ul");
+        job.generated_files.forEach((file) => {
+          const row = document.createElement("li");
+          row.textContent = file;
+          list.append(row);
+        });
+        files.append(filesTitle, list);
+        item.append(files);
+      }
 
       if (job.error || job.result) {
         const output = document.createElement("section");
@@ -106,7 +145,7 @@ form.addEventListener("submit", async (event) => {
     return;
   }
 
-  setFormState("Submitting...", true);
+  setFormState("Creating task...", true);
 
   try {
     const response = await fetch("/api/jobs", {
@@ -122,7 +161,8 @@ form.addEventListener("submit", async (event) => {
     }
 
     promptInput.value = "";
-    setFormState("Submitted.");
+    const payload = await response.json();
+    setFormState(`Task ${payload.job_id} created.`);
     await loadJobs();
   } catch (error) {
     setFormState(error.message || "Submit failed.");

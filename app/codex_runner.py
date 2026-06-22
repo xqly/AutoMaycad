@@ -7,7 +7,7 @@ import shlex
 from pathlib import Path
 
 
-DEFAULT_TIMEOUT_SECONDS = 900
+DEFAULT_TIMEOUT_SECONDS = 300
 DEFAULT_CODEX_ARGS = "exec --skip-git-repo-check"
 DEFAULT_CODEX_HOME = Path("C:/Users/xqly/.codex")
 DEFAULT_OUTPUT_LIMIT_CHARS = 50_000
