@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shlex
@@ -103,7 +104,7 @@ def _codex_environment() -> dict[str, str]:
     return env
 
 
-def _command(prompt: str, image_paths: list[str] | None = None) -> list[str]:
+def _command(image_paths: list[str] | None = None) -> list[str]:
     command = _codex_command()
     args_json = os.getenv("CODEX_ARGS_JSON")
     if args_json:
@@ -121,7 +122,22 @@ def _command(prompt: str, image_paths: list[str] | None = None) -> list[str]:
     for image_path in image_paths or []:
         image_args.extend(["--image", image_path])
 
-    return [command, *args, *image_args, prompt]
+    return [command, *args, *image_args]
+
+
+async def _write_prompt(
+    stdin: asyncio.StreamWriter | None,
+    prompt: str,
+) -> None:
+    if stdin is None:
+        return
+
+    with contextlib.suppress(BrokenPipeError, ConnectionResetError, RuntimeError):
+        stdin.write(prompt.encode("utf-8"))
+        await stdin.drain()
+    stdin.close()
+    with contextlib.suppress(BrokenPipeError, ConnectionResetError, RuntimeError):
+        await stdin.wait_closed()
 
 
 def _decode_output(output: bytes) -> str:
@@ -190,9 +206,10 @@ async def run_codex(
 
     try:
         process = await asyncio.create_subprocess_exec(
-            *_command(prompt, image_paths),
+            *_command(image_paths),
             cwd=str(_working_directory()),
             env=_codex_environment(),
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -214,6 +231,7 @@ async def run_codex(
         asyncio.create_task(_read_stream(process.stdout, stdout_buffer, mark_activity)),
         asyncio.create_task(_read_stream(process.stderr, stderr_buffer, mark_activity)),
     ]
+    prompt_writer = asyncio.create_task(_write_prompt(process.stdin, prompt))
 
     completed_by_artifact = False
     idle_timeout = _idle_timeout_seconds()
@@ -249,6 +267,7 @@ async def run_codex(
                 output = _combined_output(bytes(stdout_buffer), bytes(stderr_buffer))
                 raise CodexRunError("Codex 运行超过最大时长。", output=output)
     finally:
+        await prompt_writer
         await asyncio.gather(*readers, return_exceptions=True)
 
     stdout = bytes(stdout_buffer)

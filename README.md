@@ -41,8 +41,12 @@ http://127.0.0.1:8000
 By default the server runs:
 
 ```text
-<bundled codex> exec --skip-git-repo-check <prompt>
+<bundled codex> exec --skip-git-repo-check
 ```
+
+The prompt is piped to Codex on stdin. This avoids CLI argument parsing
+differences between Codex builds that can otherwise produce `No prompt
+provided` even when the application has built a valid task prompt.
 
 The bundled Codex binary comes from the `openai-codex` Python package installed in this project's virtual environment. This avoids the WindowsApps `codex.exe` launcher if that launcher is blocked by Windows permissions.
 
@@ -69,7 +73,8 @@ $env:JOBS_DB_PATH = "C:\path\to\workspace\tasks\jobs.sqlite3"
 uvicorn app.main:app --reload
 ```
 
-`CODEX_ARGS` is split like a shell command, but the prompt itself is passed as a separate subprocess argument.
+`CODEX_ARGS` is split like a shell command, and the prompt itself is written to
+the Codex subprocess stdin.
 Uploaded prompt images are stored under `tasks/<task-id>/input_images/` and
 passed to `codex exec` with repeated `--image <file>` arguments. The web form
 accepts up to 8 PNG, JPEG, GIF, or WebP files, with a 15 MB limit per image.
