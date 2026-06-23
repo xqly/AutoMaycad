@@ -271,6 +271,7 @@ label {
 
 input[type="text"],
 input[type="password"],
+select,
 textarea {
   width: 100%;
   border: 1px solid var(--line);
@@ -288,6 +289,7 @@ textarea {
 
 input[type="text"]:focus,
 input[type="password"]:focus,
+select:focus,
 textarea:focus {
   outline: 3px solid rgba(15, 118, 110, 0.2);
   border-color: var(--accent);
@@ -421,6 +423,31 @@ textarea:focus {
   display: grid;
   gap: 14px;
   padding: 20px;
+}
+
+.jobs-title-row,
+.job-filter-panel {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.job-filter-panel[hidden] {
+  display: none;
+}
+
+.job-filter-panel label {
+  white-space: nowrap;
+}
+
+.job-filter-panel select {
+  width: auto;
+  min-width: 180px;
+  padding: 8px 10px;
+  background: #fbfcfd;
+  color: var(--text);
+  font-size: 0.86rem;
+  font-weight: 700;
 }
 
 #job-count {
@@ -766,6 +793,21 @@ textarea:focus {
   .actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .jobs-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .job-filter-panel {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .job-filter-panel select {
+    width: 100%;
   }
 
   #submit,
