@@ -34,6 +34,8 @@ const jobsContainer = document.querySelector("#jobs");
 const jobDetailContainer = document.querySelector("#job-detail");
 const jobCount = document.querySelector("#job-count");
 const jobTitle = document.querySelector("#job-title");
+const jobOwnerFilterPanel = document.querySelector("#job-owner-filter-panel");
+const jobOwnerFilter = document.querySelector("#job-owner-filter");
 const refreshButton = document.querySelector("#refresh");
 const toast = document.querySelector("#toast");
 
@@ -52,6 +54,10 @@ let pollTimer = null;
 let toastTimer = null;
 let imagePreviewUrls = [];
 let currentUser = null;
+let notificationAudioContext = null;
+let adminUsersCache = null;
+const knownJobStatuses = new Map();
+const notifiedJobIds = new Set();
 
 class UnauthorizedError extends Error {}
 
@@ -116,6 +122,20 @@ function previewUrl(jobId, file) {
 
 function jobUrl(jobId) {
   return `/jobs/${encodeURIComponent(jobId)}`;
+}
+
+function selectedJobOwner() {
+  return new URLSearchParams(window.location.search).get("owner")?.trim() || "";
+}
+
+function jobsUrl(owner = "") {
+  const params = new URLSearchParams();
+  if (owner) {
+    params.set("owner", owner);
+  }
+
+  const query = params.toString();
+  return query ? `/jobs?${query}` : "/jobs";
 }
 
 function statusLabel(status) {
@@ -204,6 +224,9 @@ function setLoginState(message, disabled = false) {
 function showLogin(message = "") {
   window.clearTimeout(pollTimer);
   currentUser = null;
+  adminUsersCache = null;
+  knownJobStatuses.clear();
+  notifiedJobIds.clear();
   renderAccount();
   showView(loginView);
   setLoginState(message);
@@ -310,7 +333,7 @@ function errorMessageFromResponse(response, fallback) {
     .catch(() => fallback);
 }
 
-function showToast(message) {
+function showToast(message, duration = 2600) {
   window.clearTimeout(toastTimer);
   toast.textContent = message;
   toast.hidden = false;
@@ -319,7 +342,104 @@ function showToast(message) {
   toastTimer = window.setTimeout(() => {
     toast.classList.remove("toast-visible");
     toast.hidden = true;
-  }, 2600);
+  }, duration);
+}
+
+function requestNotificationPermission() {
+  if (!("Notification" in window) || Notification.permission !== "default") {
+    return;
+  }
+
+  const permissionRequest = Notification.requestPermission();
+  permissionRequest?.catch?.(() => {});
+}
+
+function unlockNotificationSound() {
+  if (!("AudioContext" in window || "webkitAudioContext" in window)) {
+    return;
+  }
+
+  const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+  if (!notificationAudioContext) {
+    notificationAudioContext = new AudioContextConstructor();
+  }
+  const resumeRequest = notificationAudioContext.resume();
+  resumeRequest?.catch?.(() => {});
+}
+
+function playCompletionSound() {
+  if (!("AudioContext" in window || "webkitAudioContext" in window)) {
+    return;
+  }
+
+  const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+  const audioContext = notificationAudioContext || new AudioContextConstructor();
+  notificationAudioContext = audioContext;
+
+  Promise.resolve(audioContext.resume()).then(() => {
+    const startTime = audioContext.currentTime;
+    const gain = audioContext.createGain();
+    gain.gain.setValueAtTime(0.0001, startTime);
+    gain.gain.exponentialRampToValueAtTime(0.18, startTime + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startTime + 0.55);
+    gain.connect(audioContext.destination);
+
+    [660, 880].forEach((frequency, index) => {
+      const oscillator = audioContext.createOscillator();
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(frequency, startTime + index * 0.18);
+      oscillator.connect(gain);
+      oscillator.start(startTime + index * 0.18);
+      oscillator.stop(startTime + index * 0.18 + 0.24);
+    });
+  }).catch(() => {});
+}
+
+function showSystemNotification(title, body, path) {
+  if (!("Notification" in window) || Notification.permission !== "granted") {
+    return;
+  }
+
+  try {
+    const notification = new Notification(title, {
+      body,
+      tag: title,
+      renotify: true,
+    });
+
+    notification.addEventListener("click", () => {
+      window.focus();
+      routeTo(path);
+      notification.close();
+    });
+    window.setTimeout(() => notification.close(), 8000);
+  } catch (error) {
+    console.warn("无法显示系统通知。", error);
+  }
+}
+
+function notifyJobCompletion(job) {
+  if (notifiedJobIds.has(job.id)) {
+    return;
+  }
+
+  notifiedJobIds.add(job.id);
+  const title = `任务 ${job.id} 已完成`;
+  const body = job.finished_at ? `完成时间 ${formatDate(job.finished_at)}` : "scene文件已生成。";
+  playCompletionSound();
+  showToast(title, 6000);
+  showSystemNotification(title, body, jobUrl(job.id));
+}
+
+function observeJobStatuses(jobs) {
+  jobs.forEach((job) => {
+    const previousStatus = knownJobStatuses.get(job.id);
+    if (previousStatus && activeStatuses.has(previousStatus) && job.status === "succeeded") {
+      notifyJobCompletion(job);
+    }
+
+    knownJobStatuses.set(job.id, job.status);
+  });
 }
 
 function routeTo(path) {
@@ -709,6 +829,28 @@ function renderJobs(jobs) {
   jobsContainer.replaceChildren(...jobs.map((job) => createJobCard(job)));
 }
 
+function renderJobOwnerFilter(users = []) {
+  const isAdmin = Boolean(currentUser?.is_admin);
+  jobOwnerFilterPanel.hidden = !isAdmin;
+  if (!isAdmin) {
+    jobOwnerFilter.replaceChildren(new Option("全部账号", ""));
+    return;
+  }
+
+  const selectedOwner = selectedJobOwner();
+  const options = [new Option("全部账号", "")];
+  users.forEach((user) => {
+    options.push(new Option(user.username, user.username));
+  });
+
+  if (selectedOwner && !users.some((user) => user.username === selectedOwner)) {
+    options.push(new Option(selectedOwner, selectedOwner));
+  }
+
+  jobOwnerFilter.replaceChildren(...options);
+  jobOwnerFilter.value = selectedOwner;
+}
+
 function renderJob(job) {
   showView(jobView);
   setActiveNav();
@@ -754,7 +896,14 @@ function renderUsers(users) {
   );
 }
 
-async function loadUsers() {
+async function fetchUsers({ force = false } = {}) {
+  if (!currentUser?.is_admin) {
+    return [];
+  }
+  if (adminUsersCache && !force) {
+    return adminUsersCache;
+  }
+
   const response = await fetch("/api/users");
   handleUnauthorized(response);
   if (response.status === 403) {
@@ -765,7 +914,12 @@ async function loadUsers() {
     throw new Error(await errorMessageFromResponse(response, "无法加载账号列表。"));
   }
 
-  const users = await response.json();
+  adminUsersCache = await response.json();
+  return adminUsersCache;
+}
+
+async function loadUsers(options) {
+  const users = await fetchUsers(options);
   renderUsers(users);
   return users;
 }
@@ -786,13 +940,26 @@ async function renderAccountView() {
 }
 
 async function loadJobs() {
-  const response = await fetch("/api/jobs");
+  const users = currentUser?.is_admin
+    ? await fetchUsers().catch((error) => {
+        if (error instanceof UnauthorizedError) {
+          throw error;
+        }
+
+        showToast(error.message || "无法加载账号筛选。");
+        return [];
+      })
+    : [];
+  const owner = currentUser?.is_admin ? selectedJobOwner() : "";
+  const response = await fetch(owner ? `/api/jobs?owner=${encodeURIComponent(owner)}` : "/api/jobs");
   handleUnauthorized(response);
   if (!response.ok) {
     throw new Error("无法加载任务列表。");
   }
 
   const jobs = await response.json();
+  observeJobStatuses(jobs);
+  renderJobOwnerFilter(users);
   renderJobs(jobs);
   return jobs;
 }
@@ -810,6 +977,7 @@ async function loadJob(jobId) {
   }
 
   const job = await response.json();
+  observeJobStatuses([job]);
   renderJob(job);
   return job;
 }
@@ -888,6 +1056,8 @@ form.addEventListener("submit", async (event) => {
   });
 
   setFormState("正在创建任务...", true);
+  unlockNotificationSound();
+  requestNotificationPermission();
 
   try {
     const response = await fetch("/api/jobs", {
@@ -905,6 +1075,7 @@ form.addEventListener("submit", async (event) => {
     renderImageList();
     const payload = await response.json();
     const detailPath = jobUrl(payload.job_id);
+    knownJobStatuses.set(payload.job_id, payload.status);
     setFormState(`任务 ${payload.job_id} 已创建。`);
     showToast(`任务 ${payload.job_id} 创建成功。`);
     window.setTimeout(() => routeTo(detailPath), 650);
@@ -1046,7 +1217,7 @@ userForm.addEventListener("submit", async (event) => {
     userForm.reset();
     setUserState("账号已添加。");
     showToast(`账号 ${username} 已添加。`);
-    await loadUsers();
+    await loadUsers({ force: true });
   } catch (error) {
     if (error instanceof UnauthorizedError) {
       return;
@@ -1059,11 +1230,15 @@ userForm.addEventListener("submit", async (event) => {
 
 usersRefreshButton.addEventListener("click", async () => {
   try {
-    await loadUsers();
+    await loadUsers({ force: true });
     showToast("账号列表已刷新。");
   } catch (error) {
     showToast(error.message || "刷新失败。");
   }
+});
+
+jobOwnerFilter.addEventListener("change", () => {
+  routeTo(jobsUrl(jobOwnerFilter.value));
 });
 
 imageInput.addEventListener("change", () => {
@@ -1092,7 +1267,7 @@ document.addEventListener("click", (event) => {
   }
 
   event.preventDefault();
-  routeTo(link.pathname);
+  routeTo(`${link.pathname}${link.search}`);
 });
 
 window.addEventListener("popstate", loadCurrentRoute);

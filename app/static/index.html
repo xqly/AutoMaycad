@@ -61,8 +61,16 @@
 
         <section id="jobs-view" class="jobs-panel app-view" aria-labelledby="jobs-title" hidden>
           <div class="jobs-header">
-            <h2 id="jobs-title">任务列表</h2>
-            <span id="job-count">0</span>
+            <div class="jobs-title-row">
+              <h2 id="jobs-title">任务列表</h2>
+              <span id="job-count">0</span>
+            </div>
+            <div id="job-owner-filter-panel" class="job-filter-panel" hidden>
+              <label for="job-owner-filter">账号</label>
+              <select id="job-owner-filter" name="owner">
+                <option value="">全部账号</option>
+              </select>
+            </div>
           </div>
           <div id="jobs" class="jobs" aria-live="polite"></div>
         </section>

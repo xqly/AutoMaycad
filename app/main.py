@@ -529,12 +529,17 @@ def get_job_from_db(job_id: str) -> Job | None:
     return job_from_row(row) if row else None
 
 
-def list_jobs_from_db(user: AuthenticatedUser | None = None) -> list[Job]:
+def list_jobs_from_db(user: AuthenticatedUser | None = None, owner: str | None = None) -> list[Job]:
     with connect_db() as connection:
         if user is not None and not user.is_admin:
             rows = connection.execute(
                 "SELECT * FROM jobs WHERE owner = ? ORDER BY created_at DESC",
                 (user.username,),
+            ).fetchall()
+        elif owner:
+            rows = connection.execute(
+                "SELECT * FROM jobs WHERE owner = ? ORDER BY created_at DESC",
+                (owner,),
             ).fetchall()
         else:
             rows = connection.execute("SELECT * FROM jobs ORDER BY created_at DESC").fetchall()
@@ -1269,10 +1274,14 @@ async def create_job(request: Request) -> CreateJobResponse:
 
 
 @app.get("/api/jobs", response_model=list[JobResponse])
-async def list_jobs(request: Request) -> list[JobResponse]:
+async def list_jobs(request: Request, owner: str | None = None) -> list[JobResponse]:
     user = current_user(request)
+    owner_filter = validate_username(owner) if owner else None
+    if owner_filter and not user.is_admin and owner_filter != user.username:
+        raise HTTPException(status_code=403, detail="只有管理员可以查看其他账号的任务。")
+
     async with jobs_lock:
-        jobs = list_jobs_from_db(user)
+        jobs = list_jobs_from_db(user, owner_filter)
         responses: list[JobResponse] = []
         for job in jobs:
             if refresh_job_files(job):
