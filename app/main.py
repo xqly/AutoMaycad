@@ -44,6 +44,12 @@ MAX_IMAGE_BYTES = 15 * 1024 * 1024
 IMAGE_CHUNK_BYTES = 1024 * 1024
 HIDDEN_GENERATED_FILES = {"codex_prompt.md", "shelf_requirements.md"}
 IMAGE_INPUT_DIR = "input_images"
+DEFAULT_SHELF_DIMENSIONS_MM = {
+    "length": 1200.0,
+    "depth": 450.0,
+    "height": 1800.0,
+}
+SHELF_KEYWORD_RE = re.compile(r"货架|架子|置物架|shelf|rack|display|storage", re.I)
 ALLOWED_IMAGE_TYPES = {
     "image/gif": ".gif",
     "image/jpeg": ".jpg",
@@ -662,6 +668,8 @@ def parse_shelf_spec(job_id: str, prompt: str) -> dict | None:
     length = parse_number_after_label(prompt, ("长", "长度", "length", "l"))
     depth = parse_number_after_label(prompt, ("宽", "深", "宽度", "深度", "depth", "width", "d", "w"))
     height = parse_number_after_label(prompt, ("高", "高度", "height", "h"))
+    looks_like_shelf = bool(SHELF_KEYWORD_RE.search(prompt))
+    defaulted_dimensions: list[str] = []
 
     if length is None or depth is None or height is None:
         dimension_match = re.search(
@@ -676,12 +684,34 @@ def parse_shelf_spec(job_id: str, prompt: str) -> dict | None:
             height = height or float(dimension_match.group(3))
 
     if length is None or depth is None or height is None:
-        return None
+        if not looks_like_shelf:
+            return None
+
+        if length is None:
+            length = DEFAULT_SHELF_DIMENSIONS_MM["length"]
+            defaulted_dimensions.append("length")
+        if depth is None:
+            depth = DEFAULT_SHELF_DIMENSIONS_MM["depth"]
+            defaulted_dimensions.append("depth")
+        if height is None:
+            height = DEFAULT_SHELF_DIMENSIONS_MM["height"]
+            defaulted_dimensions.append("height")
 
     shelf_match = re.search(r"(?:共|做|要|有)?\s*(\d+)\s*层", prompt)
     load_match = re.search(r"(\d+(?:\.\d+)?)\s*kg", prompt, re.I)
     shelf_count = int(shelf_match.group(1)) if shelf_match else 5
     load_per_shelf = float(load_match.group(1)) if load_match else 40
+    assumptions: list[str] = []
+    if defaulted_dimensions:
+        assumptions.append(
+            "Missing "
+            + ", ".join(defaulted_dimensions)
+            + " defaulted to a practical shelf envelope of 1200 x 450 x 1800 mm."
+        )
+    if shelf_match is None:
+        assumptions.append("Shelf count defaulted to 5 adjustable levels.")
+    if load_match is None:
+        assumptions.append("Load rating defaulted to 40 kg per shelf.")
 
     return {
         "project_name": job_id,
@@ -698,6 +728,7 @@ def parse_shelf_spec(job_id: str, prompt: str) -> dict | None:
         "profile_size_mm": 40,
         "panel_thickness_mm": 18,
         "include_diagonal_bracing": True,
+        "assumptions": assumptions,
     }
 
 
@@ -714,9 +745,10 @@ def run_local_shelf_generator(job_id: str, prompt: str, task_dir: Path) -> str |
     html_path = task_dir / f"{project_name}_three_views.html"
     summary_path = task_dir / f"{project_name}_summary.json"
 
+    initial_assumptions = list(spec.get("assumptions", []))
     builder = ShelfSceneBuilder(spec)
     built = builder.build()
-    spec["assumptions"] = builder.assumptions
+    spec["assumptions"] = [*initial_assumptions, *builder.assumptions]
 
     spec_path.write_text(json.dumps(spec, indent=2, ensure_ascii=False), encoding="utf-8")
     scene_path.write_text(builder.scene_xml(title, description), encoding="utf-8")
@@ -729,7 +761,7 @@ def run_local_shelf_generator(job_id: str, prompt: str, task_dir: Path) -> str |
         "profiles": builder.profile_count,
         "panels": builder.panel_count,
         "built": built,
-        "assumptions": builder.assumptions,
+        "assumptions": spec["assumptions"],
         "generator": "local_fallback",
     }
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
