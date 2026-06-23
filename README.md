@@ -13,6 +13,22 @@ The UI shows whether each job is queued, running, succeeded, or failed. It also
 shows the task folder, expected scene path, uploaded images, generated files,
 and captured Codex output when available.
 
+The site requires login before creating or viewing tasks. The current built-in
+account is:
+
+```text
+username: admin
+password: 123456
+```
+
+Tasks store an owner. Regular users can only see tasks they created, while
+`admin` can see every user's tasks. Existing tasks are assigned to `admin` when
+the database is upgraded.
+
+After login, users can open the personal center to change their own password.
+The `admin` account can also create new regular accounts there. Account names
+must be unique and may contain letters, numbers, underscores, dots, and hyphens.
+
 Jobs are stored persistently in a SQLite database at `tasks/jobs.sqlite3` by
 default. Generated task folders remain on disk under `tasks/<task-id>/`.
 
@@ -97,4 +113,7 @@ that has valid authentication.
 
 ## Security note
 
-Do not expose this app to the public internet without adding authentication and careful sandboxing. Anyone who can submit prompts can ask Codex to work in `CODEX_WORKDIR`.
+The built-in account is intentionally minimal and uses a fixed password for
+local use. Do not expose this app to the public internet without replacing it
+with stronger authentication and careful sandboxing. Anyone who can submit
+prompts can ask Codex to work in `CODEX_WORKDIR`.

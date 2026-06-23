@@ -50,8 +50,15 @@ textarea {
   display: none;
 }
 
+.top-nav[hidden],
+.icon-button[hidden] {
+  display: none;
+}
+
 .header,
+.login-panel,
 .composer,
+.account-view,
 .jobs-panel {
   background: var(--surface);
   border: 1px solid var(--line);
@@ -71,6 +78,35 @@ textarea {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.account-panel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+
+.account-panel[hidden] {
+  display: none;
+}
+
+.account-panel button {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 9px;
+  background: var(--surface-soft);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.account-panel button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .top-nav {
@@ -187,16 +223,56 @@ h4 {
   padding: 20px;
 }
 
+.login-panel {
+  display: grid;
+  gap: 12px;
+  max-width: 440px;
+  padding: 20px;
+}
+
+.account-view {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-form,
+.admin-users-panel,
+.users-list-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.settings-form {
+  max-width: 520px;
+}
+
+.admin-users-panel {
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+}
+
+.admin-users-panel[hidden] {
+  display: none;
+}
+
 label {
   color: var(--muted);
   font-size: 0.9rem;
   font-weight: 700;
 }
 
+input[type="text"],
+input[type="password"],
 textarea {
   width: 100%;
-  resize: vertical;
-  min-height: 180px;
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 14px;
@@ -205,6 +281,13 @@ textarea {
   line-height: 1.5;
 }
 
+textarea {
+  resize: vertical;
+  min-height: 180px;
+}
+
+input[type="text"]:focus,
+input[type="password"]:focus,
 textarea:focus {
   outline: 3px solid rgba(15, 118, 110, 0.2);
   border-color: var(--accent);
@@ -279,13 +362,20 @@ textarea:focus {
   gap: 12px;
 }
 
-#form-status {
+#form-status,
+#login-status,
+#password-status,
+#user-status {
   margin: 0;
   color: var(--muted);
   min-height: 1.4em;
 }
 
-#submit {
+#submit,
+#login-submit,
+#password-submit,
+#user-submit,
+#users-refresh {
   min-width: 128px;
   border: 0;
   border-radius: 8px;
@@ -296,13 +386,35 @@ textarea:focus {
   cursor: pointer;
 }
 
-#submit:hover {
+#submit:hover,
+#login-submit:hover,
+#password-submit:hover,
+#user-submit:hover,
+#users-refresh:hover {
   background: var(--accent-dark);
 }
 
-#submit:disabled {
+#submit:disabled,
+#login-submit:disabled,
+#password-submit:disabled,
+#user-submit:disabled,
+#users-refresh:disabled {
   cursor: wait;
   opacity: 0.7;
+}
+
+#users-refresh {
+  min-width: auto;
+  padding: 8px 11px;
+  background: var(--surface-soft);
+  color: var(--text);
+  border: 1px solid var(--line);
+}
+
+#users-refresh:hover {
+  border-color: var(--accent);
+  background: var(--surface);
+  color: var(--accent);
 }
 
 .jobs-panel {
@@ -325,6 +437,45 @@ textarea:focus {
 .jobs {
   display: grid;
   gap: 10px;
+}
+
+.users-list {
+  display: grid;
+  gap: 8px;
+}
+
+.user-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content max-content;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfd;
+}
+
+.user-row strong {
+  overflow-wrap: anywhere;
+}
+
+.role {
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: #e9eef4;
+  color: #465b70;
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.role-admin {
+  background: #e7f8ef;
+  color: var(--success);
+}
+
+.user-created {
+  color: var(--muted);
+  font-size: 0.8rem;
 }
 
 .job {
@@ -590,6 +741,7 @@ textarea:focus {
 
   .header,
   .composer,
+  .account-view,
   .jobs-panel {
     padding: 16px;
   }
@@ -600,7 +752,15 @@ textarea:focus {
   }
 
   .header-actions {
+    align-items: stretch;
+    flex-direction: column;
     justify-content: space-between;
+  }
+
+  .top-nav,
+  .account-panel {
+    justify-content: space-between;
+    width: 100%;
   }
 
   .actions {
@@ -608,11 +768,15 @@ textarea:focus {
     flex-direction: column;
   }
 
-  #submit {
+  #submit,
+  #login-submit,
+  #password-submit,
+  #user-submit {
     width: 100%;
   }
 
-  .job {
+  .job,
+  .user-row {
     grid-template-columns: 1fr;
   }
 
