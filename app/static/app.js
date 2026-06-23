@@ -1,3 +1,12 @@
+const loginView = document.querySelector("#login-form");
+const usernameInput = document.querySelector("#username");
+const passwordInput = document.querySelector("#password");
+const loginButton = document.querySelector("#login-submit");
+const loginStatus = document.querySelector("#login-status");
+const accountPanel = document.querySelector("#account-panel");
+const accountName = document.querySelector("#account-name");
+const logoutButton = document.querySelector("#logout");
+const topNav = document.querySelector(".top-nav");
 const form = document.querySelector("#prompt-form");
 const promptInput = document.querySelector("#prompt");
 const imageInput = document.querySelector("#images");
@@ -6,6 +15,21 @@ const submitButton = document.querySelector("#submit");
 const formStatus = document.querySelector("#form-status");
 const jobsView = document.querySelector("#jobs-view");
 const jobView = document.querySelector("#job-view");
+const accountView = document.querySelector("#account-view");
+const passwordForm = document.querySelector("#password-form");
+const currentPasswordInput = document.querySelector("#current-password");
+const newPasswordInput = document.querySelector("#new-password");
+const confirmPasswordInput = document.querySelector("#confirm-password");
+const passwordButton = document.querySelector("#password-submit");
+const passwordStatus = document.querySelector("#password-status");
+const adminUsersPanel = document.querySelector("#admin-users-panel");
+const userForm = document.querySelector("#user-form");
+const newUsernameInput = document.querySelector("#new-username");
+const newUserPasswordInput = document.querySelector("#new-user-password");
+const userButton = document.querySelector("#user-submit");
+const userStatus = document.querySelector("#user-status");
+const usersRefreshButton = document.querySelector("#users-refresh");
+const usersList = document.querySelector("#users-list");
 const jobsContainer = document.querySelector("#jobs");
 const jobDetailContainer = document.querySelector("#job-detail");
 const jobCount = document.querySelector("#job-count");
@@ -23,10 +47,13 @@ const statusLabels = {
   succeeded: "已完成",
   failed: "失败",
 };
-const views = [form, jobsView, jobView];
+const views = [loginView, form, jobsView, jobView, accountView];
 let pollTimer = null;
 let toastTimer = null;
 let imagePreviewUrls = [];
+let currentUser = null;
+
+class UnauthorizedError extends Error {}
 
 function pathLabel(path) {
   if (!path) {
@@ -146,6 +173,10 @@ function getRoute() {
     return { name: "jobs" };
   }
 
+  if (parts[0] === "account") {
+    return { name: "account" };
+  }
+
   return { name: "create" };
 }
 
@@ -155,14 +186,52 @@ function showView(activeView) {
   });
 }
 
+function renderAccount() {
+  const isAuthenticated = Boolean(currentUser);
+  accountPanel.hidden = !isAuthenticated;
+  topNav.hidden = !isAuthenticated;
+  refreshButton.hidden = !isAuthenticated;
+  accountName.textContent = isAuthenticated
+    ? `${currentUser.username}${currentUser.is_admin ? " · 管理员" : ""}`
+    : "";
+}
+
+function setLoginState(message, disabled = false) {
+  loginStatus.textContent = message;
+  loginButton.disabled = disabled;
+}
+
+function showLogin(message = "") {
+  window.clearTimeout(pollTimer);
+  currentUser = null;
+  renderAccount();
+  showView(loginView);
+  setLoginState(message);
+  passwordInput.focus();
+}
+
+function handleUnauthorized(response) {
+  if (response.status !== 401) {
+    return;
+  }
+
+  showLogin("请先登录。");
+  throw new UnauthorizedError();
+}
+
 function setActiveNav() {
   const route = getRoute();
   document.querySelectorAll(".top-nav [data-route]").forEach((link) => {
     const isJobsLink = link.getAttribute("href") === "/jobs";
     const isCreateLink = link.getAttribute("href") === "/";
+    const isAccountLink = link.getAttribute("href") === "/account";
     link.removeAttribute("aria-current");
 
-    if ((route.name === "create" && isCreateLink) || (route.name !== "create" && isJobsLink)) {
+    if (
+      (route.name === "create" && isCreateLink) ||
+      ((route.name === "jobs" || route.name === "job") && isJobsLink) ||
+      (route.name === "account" && isAccountLink)
+    ) {
       link.setAttribute("aria-current", "page");
     }
   });
@@ -171,6 +240,16 @@ function setActiveNav() {
 function setFormState(message, disabled = false) {
   formStatus.textContent = message;
   submitButton.disabled = disabled;
+}
+
+function setPasswordState(message, disabled = false) {
+  passwordStatus.textContent = message;
+  passwordButton.disabled = disabled;
+}
+
+function setUserState(message, disabled = false) {
+  userStatus.textContent = message;
+  userButton.disabled = disabled;
 }
 
 function selectedImages() {
@@ -246,6 +325,22 @@ function showToast(message) {
 function routeTo(path) {
   window.history.pushState({}, "", path);
   loadCurrentRoute();
+}
+
+async function loadSession() {
+  const response = await fetch("/api/session");
+  if (response.status === 401) {
+    showLogin();
+    return false;
+  }
+
+  if (!response.ok) {
+    throw new Error("无法读取登录状态。");
+  }
+
+  currentUser = await response.json();
+  renderAccount();
+  return true;
 }
 
 function appendPaths(container, job) {
@@ -353,6 +448,7 @@ function sanitizePreviewDocument(doc) {
 async function loadThreeViewPreview(host, job, file) {
   try {
     const response = await fetch(previewUrl(job.id, file));
+    handleUnauthorized(response);
     if (!response.ok) {
       throw new Error("无法加载三视图预览。");
     }
@@ -491,6 +587,10 @@ async function loadThreeViewPreview(host, job, file) {
       });
     }
   } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      return;
+    }
+
     host.textContent = error.message || "无法加载三视图预览。";
     host.classList.add("job-preview-error");
   }
@@ -566,6 +666,7 @@ function createJobCard(job, { detail = false } = {}) {
   const meta = document.createElement("div");
   meta.className = "job-meta";
   meta.textContent = [
+    currentUser?.is_admin && job.owner ? `创建者 ${job.owner}` : "",
     `创建 ${formatDate(job.created_at)}`,
     job.started_at ? `开始 ${formatDate(job.started_at)}` : "",
     job.finished_at ? `完成 ${formatDate(job.finished_at)}` : "",
@@ -625,8 +726,68 @@ function renderJobError(message) {
   jobDetailContainer.replaceChildren(empty);
 }
 
+function renderUsers(users) {
+  if (!users.length) {
+    usersList.innerHTML = '<p class="empty">暂无账号。</p>';
+    return;
+  }
+
+  usersList.replaceChildren(
+    ...users.map((user) => {
+      const item = document.createElement("article");
+      item.className = "user-row";
+
+      const name = document.createElement("strong");
+      name.textContent = user.username;
+
+      const role = document.createElement("span");
+      role.className = user.is_admin ? "role role-admin" : "role";
+      role.textContent = user.is_admin ? "管理员" : "普通账号";
+
+      const created = document.createElement("span");
+      created.className = "user-created";
+      created.textContent = `创建 ${formatDate(user.created_at)}`;
+
+      item.append(name, role, created);
+      return item;
+    }),
+  );
+}
+
+async function loadUsers() {
+  const response = await fetch("/api/users");
+  handleUnauthorized(response);
+  if (response.status === 403) {
+    adminUsersPanel.hidden = true;
+    return [];
+  }
+  if (!response.ok) {
+    throw new Error(await errorMessageFromResponse(response, "无法加载账号列表。"));
+  }
+
+  const users = await response.json();
+  renderUsers(users);
+  return users;
+}
+
+async function renderAccountView() {
+  showView(accountView);
+  setActiveNav();
+  setPasswordState("");
+  adminUsersPanel.hidden = !currentUser?.is_admin;
+
+  if (currentUser?.is_admin) {
+    try {
+      await loadUsers();
+    } catch (error) {
+      showToast(error.message || "无法加载账号列表。");
+    }
+  }
+}
+
 async function loadJobs() {
   const response = await fetch("/api/jobs");
+  handleUnauthorized(response);
   if (!response.ok) {
     throw new Error("无法加载任务列表。");
   }
@@ -638,6 +799,7 @@ async function loadJobs() {
 
 async function loadJob(jobId) {
   const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
+  handleUnauthorized(response);
   if (response.status === 404) {
     renderJobError("找不到该任务。");
     return null;
@@ -654,6 +816,11 @@ async function loadJob(jobId) {
 
 async function loadCurrentRoute() {
   window.clearTimeout(pollTimer);
+  if (!currentUser) {
+    showLogin();
+    return;
+  }
+
   const route = getRoute();
 
   try {
@@ -674,9 +841,18 @@ async function loadCurrentRoute() {
       return;
     }
 
+    if (route.name === "account") {
+      await renderAccountView();
+      return;
+    }
+
     showView(form);
     setActiveNav();
   } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      return;
+    }
+
     showToast(error.message || "无法加载页面。");
     schedulePoll(5000);
   }
@@ -718,6 +894,7 @@ form.addEventListener("submit", async (event) => {
       method: "POST",
       body: formData,
     });
+    handleUnauthorized(response);
 
     if (!response.ok) {
       throw new Error(await errorMessageFromResponse(response, "需求提交被拒绝。"));
@@ -732,9 +909,160 @@ form.addEventListener("submit", async (event) => {
     showToast(`任务 ${payload.job_id} 创建成功。`);
     window.setTimeout(() => routeTo(detailPath), 650);
   } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      return;
+    }
+
     setFormState(error.message || "提交失败。");
   } finally {
     submitButton.disabled = false;
+  }
+});
+
+loginView.addEventListener("submit", async (event) => {
+  event.preventDefault();
+
+  const username = usernameInput.value.trim();
+  const password = passwordInput.value;
+  if (!username || !password) {
+    setLoginState("请输入账号和密码。");
+    (username ? passwordInput : usernameInput).focus();
+    return;
+  }
+
+  setLoginState("正在登录...", true);
+
+  try {
+    const response = await fetch("/api/login", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ username, password }),
+    });
+
+    if (!response.ok) {
+      throw new Error(await errorMessageFromResponse(response, "登录失败。"));
+    }
+
+    currentUser = await response.json();
+    passwordInput.value = "";
+    renderAccount();
+    showToast(`已登录：${currentUser.username}`);
+    await loadCurrentRoute();
+  } catch (error) {
+    setLoginState(error.message || "登录失败。");
+  } finally {
+    loginButton.disabled = false;
+  }
+});
+
+logoutButton.addEventListener("click", async () => {
+  try {
+    await fetch("/api/logout", { method: "POST" });
+  } finally {
+    currentUser = null;
+    renderAccount();
+    window.history.pushState({}, "", "/");
+    showLogin("已退出登录。");
+  }
+});
+
+passwordForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+
+  const currentPassword = currentPasswordInput.value;
+  const newPassword = newPasswordInput.value;
+  const confirmPassword = confirmPasswordInput.value;
+  if (!currentPassword || !newPassword || !confirmPassword) {
+    setPasswordState("请完整填写密码。");
+    return;
+  }
+  if (newPassword !== confirmPassword) {
+    setPasswordState("两次输入的新密码不一致。");
+    confirmPasswordInput.focus();
+    return;
+  }
+
+  setPasswordState("正在保存...", true);
+
+  try {
+    const response = await fetch("/api/account/password", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+    });
+    handleUnauthorized(response);
+
+    if (!response.ok) {
+      throw new Error(await errorMessageFromResponse(response, "密码修改失败。"));
+    }
+
+    passwordForm.reset();
+    setPasswordState("密码已修改。");
+    showToast("密码已修改。");
+  } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      return;
+    }
+    setPasswordState(error.message || "密码修改失败。");
+  } finally {
+    passwordButton.disabled = false;
+  }
+});
+
+userForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+
+  const username = newUsernameInput.value.trim();
+  const password = newUserPasswordInput.value;
+  if (!username || !password) {
+    setUserState("请填写账号和初始密码。");
+    (username ? newUserPasswordInput : newUsernameInput).focus();
+    return;
+  }
+
+  setUserState("正在添加账号...", true);
+
+  try {
+    const response = await fetch("/api/users", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ username, password }),
+    });
+    handleUnauthorized(response);
+
+    if (!response.ok) {
+      throw new Error(await errorMessageFromResponse(response, "账号添加失败。"));
+    }
+
+    userForm.reset();
+    setUserState("账号已添加。");
+    showToast(`账号 ${username} 已添加。`);
+    await loadUsers();
+  } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      return;
+    }
+    setUserState(error.message || "账号添加失败。");
+  } finally {
+    userButton.disabled = false;
+  }
+});
+
+usersRefreshButton.addEventListener("click", async () => {
+  try {
+    await loadUsers();
+    showToast("账号列表已刷新。");
+  } catch (error) {
+    showToast(error.message || "刷新失败。");
   }
 });
 
@@ -770,4 +1098,17 @@ document.addEventListener("click", (event) => {
 window.addEventListener("popstate", loadCurrentRoute);
 window.addEventListener("beforeunload", clearImagePreviewUrls);
 
-loadCurrentRoute();
+async function initializeApp() {
+  renderAccount();
+
+  try {
+    if (await loadSession()) {
+      await loadCurrentRoute();
+    }
+  } catch (error) {
+    showLogin("无法读取登录状态，请重新登录。");
+    showToast(error.message || "初始化失败。");
+  }
+}
+
+initializeApp();

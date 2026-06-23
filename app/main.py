@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
+import hashlib
 import io
 import json
 import os
 import re
+import secrets
 import shutil
 import sqlite3
 import textwrap
@@ -18,7 +21,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -44,6 +47,13 @@ MAX_IMAGE_BYTES = 15 * 1024 * 1024
 IMAGE_CHUNK_BYTES = 1024 * 1024
 HIDDEN_GENERATED_FILES = {"codex_prompt.md", "shelf_requirements.md"}
 IMAGE_INPUT_DIR = "input_images"
+SESSION_COOKIE_NAME = "automaycad_session"
+SESSION_SECRET = os.getenv("SESSION_SECRET") or secrets.token_hex(32)
+SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 14
+DEFAULT_ADMIN_USERNAME = "admin"
+DEFAULT_ADMIN_PASSWORD = "123456"
+PASSWORD_HASH_ITERATIONS = 210_000
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 DEFAULT_SHELF_DIMENSIONS_MM = {
     "length": 1200.0,
     "depth": 450.0,
@@ -72,6 +82,7 @@ class Job:
     task_dir: str
     requirement_path: str
     scene_path: str
+    owner: str
     status: JobStatus
     created_at: str
     started_at: str | None = None
@@ -85,12 +96,40 @@ class CreateJobRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=MAX_PROMPT_LENGTH)
 
 
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=200)
+    new_password: str = Field(min_length=1, max_length=200)
+
+
+class CreateUserRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class SessionResponse(BaseModel):
+    authenticated: Literal[True]
+    username: str
+    is_admin: bool
+
+
+class UserResponse(BaseModel):
+    username: str
+    is_admin: bool
+    created_at: str
+
+
 class CreateJobResponse(BaseModel):
     accepted: Literal[True]
     job_id: str
     task_dir: str
     requirement_path: str
     scene_path: str
+    owner: str
     status: JobStatus
 
 
@@ -100,6 +139,7 @@ class JobResponse(BaseModel):
     task_dir: str
     requirement_path: str
     scene_path: str
+    owner: str
     status: JobStatus
     created_at: str
     started_at: str | None
@@ -115,6 +155,20 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 jobs_lock = asyncio.Lock()
 
 
+@dataclass(frozen=True, slots=True)
+class AuthenticatedUser:
+    username: str
+    is_admin: bool
+
+
+@dataclass(frozen=True, slots=True)
+class UserAccount:
+    username: str
+    password_hash: str
+    is_admin: bool
+    created_at: str
+
+
 def connect_db() -> sqlite3.Connection:
     JOBS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(JOBS_DB_PATH)
@@ -124,8 +178,210 @@ def connect_db() -> sqlite3.Connection:
     return connection
 
 
+def validate_username(username: str) -> str:
+    username = username.strip()
+    if not username:
+        raise HTTPException(status_code=422, detail="账号不能为空。")
+    if not USERNAME_RE.fullmatch(username):
+        raise HTTPException(status_code=422, detail="账号只能包含字母、数字、下划线、点和短横线，最长 80 个字符。")
+    return username
+
+
+def validate_password(password: str) -> str:
+    if not password:
+        raise HTTPException(status_code=422, detail="密码不能为空。")
+    if len(password) > 200:
+        raise HTTPException(status_code=422, detail="密码不能超过 200 个字符。")
+    return password
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        PASSWORD_HASH_ITERATIONS,
+    ).hex()
+    return f"pbkdf2_sha256${PASSWORD_HASH_ITERATIONS}${salt}${digest}"
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    try:
+        algorithm, iterations_text, salt, expected_digest = stored_hash.split("$", 3)
+        iterations = int(iterations_text)
+    except ValueError:
+        return False
+
+    if algorithm != "pbkdf2_sha256" or iterations <= 0:
+        return False
+
+    actual_digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        iterations,
+    ).hex()
+    return hmac.compare_digest(actual_digest, expected_digest)
+
+
+def user_from_row(row: sqlite3.Row) -> UserAccount:
+    return UserAccount(
+        username=row["username"],
+        password_hash=row["password_hash"],
+        is_admin=bool(row["is_admin"]),
+        created_at=row["created_at"],
+    )
+
+
+def ensure_users_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            username TEXT PRIMARY KEY,
+            password_hash TEXT NOT NULL,
+            is_admin INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    row = connection.execute(
+        "SELECT 1 FROM users WHERE username = ?",
+        (DEFAULT_ADMIN_USERNAME,),
+    ).fetchone()
+    if row is None:
+        now = utc_now()
+        connection.execute(
+            """
+            INSERT INTO users (username, password_hash, is_admin, created_at, updated_at)
+            VALUES (?, ?, 1, ?, ?)
+            """,
+            (
+                DEFAULT_ADMIN_USERNAME,
+                hash_password(DEFAULT_ADMIN_PASSWORD),
+                now,
+                now,
+            ),
+        )
+
+
+def get_user_from_db(username: str) -> UserAccount | None:
+    with connect_db() as connection:
+        row = connection.execute(
+            "SELECT * FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+    return user_from_row(row) if row else None
+
+
+def list_users_from_db() -> list[UserAccount]:
+    with connect_db() as connection:
+        rows = connection.execute("SELECT * FROM users ORDER BY is_admin DESC, username ASC").fetchall()
+    return [user_from_row(row) for row in rows]
+
+
+def insert_user(username: str, password: str, *, is_admin: bool = False) -> UserAccount:
+    now = utc_now()
+    with connect_db() as connection:
+        try:
+            connection.execute(
+                """
+                INSERT INTO users (username, password_hash, is_admin, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    username,
+                    hash_password(password),
+                    1 if is_admin else 0,
+                    now,
+                    now,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(status_code=409, detail="账号已存在。") from exc
+    return UserAccount(username=username, password_hash="", is_admin=is_admin, created_at=now)
+
+
+def update_user_password(username: str, password: str) -> None:
+    with connect_db() as connection:
+        cursor = connection.execute(
+            "UPDATE users SET password_hash = ?, updated_at = ? WHERE username = ?",
+            (hash_password(password), utc_now(), username),
+        )
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="找不到该账号。")
+
+
+def session_signature(username: str) -> str:
+    return hmac.new(
+        SESSION_SECRET.encode("utf-8"),
+        username.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def session_cookie_value(username: str) -> str:
+    return f"{username}:{session_signature(username)}"
+
+
+def user_from_session_cookie(cookie_value: str | None) -> AuthenticatedUser | None:
+    if not cookie_value or ":" not in cookie_value:
+        return None
+
+    username, signature = cookie_value.split(":", 1)
+    user = get_user_from_db(username)
+    if user is None:
+        return None
+
+    if not hmac.compare_digest(signature, session_signature(username)):
+        return None
+
+    return AuthenticatedUser(username=username, is_admin=user.is_admin)
+
+
+def current_user(request: Request) -> AuthenticatedUser:
+    user = user_from_session_cookie(request.cookies.get(SESSION_COOKIE_NAME))
+    if user is None:
+        raise HTTPException(status_code=401, detail="请先登录。")
+    return user
+
+
+def can_access_job(user: AuthenticatedUser, job: Job) -> bool:
+    return user.is_admin or job.owner == user.username
+
+
+def require_job_access(user: AuthenticatedUser, job: Job) -> None:
+    if not can_access_job(user, job):
+        raise HTTPException(status_code=404, detail="找不到该任务。")
+
+
+def set_session_cookie(response: Response, username: str) -> None:
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        session_cookie_value(username),
+        max_age=SESSION_MAX_AGE_SECONDS,
+        httponly=True,
+        samesite="lax",
+    )
+
+
+def clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(SESSION_COOKIE_NAME, httponly=True, samesite="lax")
+
+
+def ensure_jobs_schema(connection: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+    }
+    if "owner" not in columns:
+        connection.execute("ALTER TABLE jobs ADD COLUMN owner TEXT NOT NULL DEFAULT 'admin'")
+
+
 def init_jobs_db() -> None:
     with connect_db() as connection:
+        ensure_users_schema(connection)
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS jobs (
@@ -134,6 +390,7 @@ def init_jobs_db() -> None:
                 task_dir TEXT NOT NULL,
                 requirement_path TEXT NOT NULL,
                 scene_path TEXT NOT NULL,
+                owner TEXT NOT NULL DEFAULT 'admin',
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 started_at TEXT,
@@ -145,7 +402,9 @@ def init_jobs_db() -> None:
             )
             """
         )
+        ensure_jobs_schema(connection)
         connection.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_jobs_owner_created_at ON jobs(owner, created_at)")
 
 
 def encode_generated_files(files: list[str] | None) -> str:
@@ -173,6 +432,7 @@ def job_from_row(row: sqlite3.Row) -> Job:
         task_dir=row["task_dir"],
         requirement_path=row["requirement_path"],
         scene_path=row["scene_path"],
+        owner=row["owner"],
         status=JobStatus(row["status"]),
         created_at=row["created_at"],
         started_at=row["started_at"],
@@ -193,6 +453,7 @@ def insert_job(job: Job) -> None:
                 task_dir,
                 requirement_path,
                 scene_path,
+                owner,
                 status,
                 created_at,
                 started_at,
@@ -202,7 +463,7 @@ def insert_job(job: Job) -> None:
                 generated_files,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job.id,
@@ -210,6 +471,7 @@ def insert_job(job: Job) -> None:
                 job.task_dir,
                 job.requirement_path,
                 job.scene_path,
+                job.owner,
                 job.status.value,
                 job.created_at,
                 job.started_at,
@@ -231,6 +493,7 @@ def save_job(job: Job) -> None:
                 task_dir = ?,
                 requirement_path = ?,
                 scene_path = ?,
+                owner = ?,
                 status = ?,
                 created_at = ?,
                 started_at = ?,
@@ -246,6 +509,7 @@ def save_job(job: Job) -> None:
                 job.task_dir,
                 job.requirement_path,
                 job.scene_path,
+                job.owner,
                 job.status.value,
                 job.created_at,
                 job.started_at,
@@ -265,9 +529,15 @@ def get_job_from_db(job_id: str) -> Job | None:
     return job_from_row(row) if row else None
 
 
-def list_jobs_from_db() -> list[Job]:
+def list_jobs_from_db(user: AuthenticatedUser | None = None) -> list[Job]:
     with connect_db() as connection:
-        rows = connection.execute("SELECT * FROM jobs ORDER BY created_at DESC").fetchall()
+        if user is not None and not user.is_admin:
+            rows = connection.execute(
+                "SELECT * FROM jobs WHERE owner = ? ORDER BY created_at DESC",
+                (user.username,),
+            ).fetchall()
+        else:
+            rows = connection.execute("SELECT * FROM jobs ORDER BY created_at DESC").fetchall()
     return [job_from_row(row) for row in rows]
 
 
@@ -632,6 +902,7 @@ def recover_jobs_from_disk() -> None:
             task_dir=str(task_dir.resolve()),
             requirement_path=str(requirement_path.resolve()),
             scene_path=str(scene_path.resolve()),
+            owner="admin",
             status=JobStatus.SUCCEEDED if scenes else JobStatus.FAILED,
             created_at=timestamp_for_path(task_dir),
             finished_at=datetime.fromtimestamp(newest_mtime, UTC).isoformat(),
@@ -861,8 +1132,77 @@ async def job_page(job_id: str) -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/account")
+async def account_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/api/session", response_model=SessionResponse)
+async def get_session(request: Request) -> SessionResponse:
+    user = current_user(request)
+    return SessionResponse(authenticated=True, username=user.username, is_admin=user.is_admin)
+
+
+@app.post("/api/login", response_model=SessionResponse)
+async def login(payload: LoginRequest, response: Response) -> SessionResponse:
+    username = validate_username(payload.username)
+    password = validate_password(payload.password)
+    user = get_user_from_db(username)
+    if user is None or not verify_password(password, user.password_hash):
+        raise HTTPException(status_code=401, detail="账号或密码不正确。")
+
+    set_session_cookie(response, username)
+    return SessionResponse(authenticated=True, username=username, is_admin=user.is_admin)
+
+
+@app.post("/api/logout", status_code=204)
+async def logout(response: Response) -> Response:
+    clear_session_cookie(response)
+    response.status_code = 204
+    return response
+
+
+@app.post("/api/account/password", status_code=204)
+async def change_password(request: Request, payload: ChangePasswordRequest, response: Response) -> Response:
+    user = current_user(request)
+    current_password = validate_password(payload.current_password)
+    new_password = validate_password(payload.new_password)
+    account = get_user_from_db(user.username)
+    if account is None or not verify_password(current_password, account.password_hash):
+        raise HTTPException(status_code=401, detail="当前密码不正确。")
+
+    update_user_password(user.username, new_password)
+    response.status_code = 204
+    return response
+
+
+@app.get("/api/users", response_model=list[UserResponse])
+async def list_users(request: Request) -> list[UserResponse]:
+    user = current_user(request)
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="只有管理员可以查看账号。")
+
+    return [
+        UserResponse(username=account.username, is_admin=account.is_admin, created_at=account.created_at)
+        for account in list_users_from_db()
+    ]
+
+
+@app.post("/api/users", response_model=UserResponse, status_code=201)
+async def create_user(request: Request, payload: CreateUserRequest) -> UserResponse:
+    user = current_user(request)
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="只有管理员可以添加账号。")
+
+    username = validate_username(payload.username)
+    password = validate_password(payload.password)
+    account = insert_user(username, password)
+    return UserResponse(username=account.username, is_admin=account.is_admin, created_at=account.created_at)
+
+
 @app.post("/api/jobs", response_model=CreateJobResponse, status_code=202)
 async def create_job(request: Request) -> CreateJobResponse:
+    user = current_user(request)
     prompt, uploads = await parse_create_job_request(request)
     validate_image_uploads(uploads)
 
@@ -902,6 +1242,7 @@ async def create_job(request: Request) -> CreateJobResponse:
         task_dir=str(task_dir),
         requirement_path=str(requirement_path),
         scene_path=str(scene_path),
+        owner=user.username,
         status=JobStatus.QUEUED,
         created_at=utc_now(),
         generated_files=generated_files(task_dir),
@@ -922,14 +1263,16 @@ async def create_job(request: Request) -> CreateJobResponse:
         task_dir=str(task_dir),
         requirement_path=str(requirement_path),
         scene_path=str(scene_path),
+        owner=job.owner,
         status=job.status,
     )
 
 
 @app.get("/api/jobs", response_model=list[JobResponse])
-async def list_jobs() -> list[JobResponse]:
+async def list_jobs(request: Request) -> list[JobResponse]:
+    user = current_user(request)
     async with jobs_lock:
-        jobs = list_jobs_from_db()
+        jobs = list_jobs_from_db(user)
         responses: list[JobResponse] = []
         for job in jobs:
             if refresh_job_files(job):
@@ -939,11 +1282,13 @@ async def list_jobs() -> list[JobResponse]:
 
 
 @app.get("/api/jobs/{job_id}/files/{file_path:path}")
-async def download_job_file(job_id: str, file_path: str) -> FileResponse:
+async def download_job_file(request: Request, job_id: str, file_path: str) -> FileResponse:
+    user = current_user(request)
     async with jobs_lock:
         job = get_job_from_db(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="找不到该任务。")
+        require_job_access(user, job)
         task_dir = Path(job.task_dir).resolve()
 
     requested_path = Path(file_path)
@@ -973,11 +1318,13 @@ async def download_job_file(job_id: str, file_path: str) -> FileResponse:
 
 
 @app.get("/api/jobs/{job_id}/download-all")
-async def download_all_job_files(job_id: str) -> StreamingResponse:
+async def download_all_job_files(request: Request, job_id: str) -> StreamingResponse:
+    user = current_user(request)
     async with jobs_lock:
         job = get_job_from_db(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="找不到该任务。")
+        require_job_access(user, job)
         task_dir = Path(job.task_dir).resolve()
 
     archive = build_job_archive(task_dir)
@@ -990,11 +1337,13 @@ async def download_all_job_files(job_id: str) -> StreamingResponse:
 
 
 @app.get("/api/jobs/{job_id}/preview/{file_path:path}")
-async def preview_job_file(job_id: str, file_path: str) -> FileResponse:
+async def preview_job_file(request: Request, job_id: str, file_path: str) -> FileResponse:
+    user = current_user(request)
     async with jobs_lock:
         job = get_job_from_db(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="找不到该任务。")
+        require_job_access(user, job)
         task_dir = Path(job.task_dir).resolve()
 
     requested_path = Path(file_path)
@@ -1020,11 +1369,13 @@ async def preview_job_file(job_id: str, file_path: str) -> FileResponse:
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobResponse)
-async def get_job(job_id: str) -> JobResponse:
+async def get_job(request: Request, job_id: str) -> JobResponse:
+    user = current_user(request)
     async with jobs_lock:
         job = get_job_from_db(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="找不到该任务。")
+        require_job_access(user, job)
         if refresh_job_files(job):
             save_job(job)
         return job_to_response(job)
