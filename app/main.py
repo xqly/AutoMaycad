@@ -5,6 +5,7 @@ import hmac
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import secrets
@@ -66,6 +67,42 @@ ALLOWED_IMAGE_TYPES = {
     "image/png": ".png",
     "image/webp": ".webp",
 }
+DEBUG_MODE = os.getenv("AUTOMAYCAD_DEBUG", "").lower() in {"1", "true", "yes", "on"}
+LOG_LEVEL_NAME = os.getenv("LOG_LEVEL", "DEBUG" if DEBUG_MODE else "INFO").upper()
+LOG_LEVEL = getattr(logging, LOG_LEVEL_NAME, logging.INFO)
+
+
+def configure_logging() -> None:
+    formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+    logging.basicConfig(level=LOG_LEVEL, format=formatter._fmt)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(LOG_LEVEL)
+    for handler in root_logger.handlers:
+        handler.setLevel(LOG_LEVEL)
+        handler.setFormatter(formatter)
+
+    log_file = os.getenv("AUTOMAYCAD_LOG_FILE")
+    if log_file:
+        log_path = Path(log_file).expanduser().resolve()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        already_attached = any(
+            isinstance(handler, logging.FileHandler)
+            and Path(handler.baseFilename) == log_path
+            for handler in root_logger.handlers
+        )
+        if not already_attached:
+            file_handler = logging.FileHandler(log_path, encoding="utf-8")
+            file_handler.setLevel(LOG_LEVEL)
+            file_handler.setFormatter(formatter)
+            root_logger.addHandler(file_handler)
+
+    for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logging.getLogger(logger_name).setLevel(LOG_LEVEL)
+
+
+configure_logging()
+logger = logging.getLogger("automaycad")
 
 
 class JobStatus(StrEnum):
@@ -149,10 +186,52 @@ class JobResponse(BaseModel):
     generated_files: list[str] | None
 
 
-app = FastAPI(title="AutoMaycad 货架任务")
+app = FastAPI(title="AutoMaycad 货架任务", debug=DEBUG_MODE)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 jobs_lock = asyncio.Lock()
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next: Callable) -> Response:
+    started_at = time.perf_counter()
+    client = request.client.host if request.client else "-"
+    path = request.url.path
+    if request.url.query:
+        path = f"{path}?{request.url.query}"
+
+    logger.debug(
+        "request.start method=%s path=%s client=%s content_length=%s",
+        request.method,
+        path,
+        client,
+        request.headers.get("content-length", "-"),
+    )
+
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration_ms = (time.perf_counter() - started_at) * 1000
+        logger.exception(
+            "request.error method=%s path=%s client=%s duration_ms=%.1f",
+            request.method,
+            path,
+            client,
+            duration_ms,
+        )
+        raise
+
+    duration_ms = (time.perf_counter() - started_at) * 1000
+    log = logger.warning if response.status_code >= 400 else logger.debug
+    log(
+        "request.finish method=%s path=%s status=%s duration_ms=%.1f client=%s",
+        request.method,
+        path,
+        response.status_code,
+        duration_ms,
+        client,
+    )
+    return response
 
 
 @dataclass(frozen=True, slots=True)
@@ -637,6 +716,12 @@ async def save_image_uploads(
             await upload.close()
 
         image_paths.append(target_path)
+        logger.debug(
+            "upload.saved path=%s content_type=%s bytes=%s",
+            target_path,
+            upload.content_type,
+            written_bytes,
+        )
 
     return image_paths
 
@@ -822,7 +907,8 @@ def task_completion_check(task_dir: Path, stable_seconds: float = 5.0) -> Callab
     def check() -> bool:
         nonlocal stable_snapshot, stable_since
 
-        if not scene_files(task_dir):
+        scenes = scene_files(task_dir)
+        if not scenes:
             stable_snapshot = None
             stable_since = 0.0
             return False
@@ -832,9 +918,18 @@ def task_completion_check(task_dir: Path, stable_seconds: float = 5.0) -> Callab
         if snapshot != stable_snapshot:
             stable_snapshot = snapshot
             stable_since = now
+            logger.debug(
+                "job.scene_seen task_dir=%s scenes=%s waiting_for_stable_seconds=%.1f",
+                task_dir,
+                scenes,
+                stable_seconds,
+            )
             return False
 
-        return now - stable_since >= stable_seconds
+        stable = now - stable_since >= stable_seconds
+        if stable:
+            logger.debug("job.scene_stable task_dir=%s scenes=%s", task_dir, scenes)
+        return stable
 
     return check
 
@@ -1050,14 +1145,23 @@ async def execute_job(
     codex_prompt: str,
     image_paths: list[Path] | None = None,
 ) -> None:
+    logger.info(
+        "job.start job_id=%s prompt_chars=%s codex_prompt_chars=%s image_count=%s",
+        job_id,
+        len(user_prompt),
+        len(codex_prompt),
+        len(image_paths or []),
+    )
     async with jobs_lock:
         job = get_job_from_db(job_id)
         if job is None:
+            logger.warning("job.missing job_id=%s phase=start", job_id)
             return
         job.status = JobStatus.RUNNING
         job.started_at = utc_now()
         task_dir = Path(job.task_dir)
         save_job(job)
+        logger.debug("job.running job_id=%s task_dir=%s", job_id, task_dir)
 
     result: str | None = None
     error: str | None = None
@@ -1070,6 +1174,13 @@ async def execute_job(
         )
     except CodexRunError as exc:
         result = exc.output or None
+        logger.warning(
+            "job.codex_error job_id=%s error=%s output_chars=%s",
+            job_id,
+            exc,
+            len(result or ""),
+            exc_info=DEBUG_MODE,
+        )
         if scene_files(task_dir):
             status = JobStatus.SUCCEEDED
             error = None
@@ -1086,6 +1197,12 @@ async def execute_job(
             error = str(exc)
     else:
         scenes = scene_files(task_dir)
+        logger.debug(
+            "job.codex_finished job_id=%s output_chars=%s scene_count=%s",
+            job_id,
+            len(result or ""),
+            len(scenes),
+        )
         if scenes:
             status = JobStatus.SUCCEEDED
         else:
@@ -1093,11 +1210,15 @@ async def execute_job(
             error = "Codex 已完成，但任务文件夹中未找到 .scene 文件。"
 
     if status == JobStatus.FAILED and not scene_files(task_dir):
+        logger.info("job.fallback_start job_id=%s", job_id)
         fallback_result = run_local_shelf_generator(job_id, user_prompt, task_dir)
         if fallback_result and scene_files(task_dir):
             status = JobStatus.SUCCEEDED
             result = "\n\n".join(item for item in (result, fallback_result) if item)
             error = None
+            logger.info("job.fallback_succeeded job_id=%s", job_id)
+        else:
+            logger.warning("job.fallback_failed job_id=%s", job_id)
 
     if scene_files(task_dir):
         sanitize_scene_files(task_dir)
@@ -1105,6 +1226,7 @@ async def execute_job(
     async with jobs_lock:
         job = get_job_from_db(job_id)
         if job is None:
+            logger.warning("job.missing job_id=%s phase=finish", job_id)
             return
         job.status = status
         job.finished_at = utc_now()
@@ -1112,14 +1234,31 @@ async def execute_job(
         job.error = error
         job.generated_files = generated_files(Path(job.task_dir))
         save_job(job)
+        logger.info(
+            "job.finish job_id=%s status=%s generated_files=%s error=%s",
+            job_id,
+            status.value,
+            job.generated_files,
+            error,
+        )
 
 
 @app.on_event("startup")
 async def load_recovered_jobs() -> None:
+    logger.info(
+        "app.startup debug=%s log_level=%s project_dir=%s tasks_dir=%s jobs_db=%s codex_home=%s",
+        DEBUG_MODE,
+        logging.getLevelName(LOG_LEVEL),
+        PROJECT_DIR,
+        TASKS_DIR,
+        JOBS_DB_PATH,
+        os.getenv("CODEX_HOME", ""),
+    )
     async with jobs_lock:
         init_jobs_db()
         recover_jobs_from_disk()
         reconcile_jobs_after_startup()
+    logger.info("app.startup_complete jobs=%s", len(list_jobs_from_db()))
 
 
 @app.get("/")
@@ -1154,9 +1293,11 @@ async def login(payload: LoginRequest, response: Response) -> SessionResponse:
     password = validate_password(payload.password)
     user = get_user_from_db(username)
     if user is None or not verify_password(password, user.password_hash):
+        logger.warning("auth.login_failed username=%s", username)
         raise HTTPException(status_code=401, detail="账号或密码不正确。")
 
     set_session_cookie(response, username)
+    logger.info("auth.login_success username=%s is_admin=%s", username, user.is_admin)
     return SessionResponse(authenticated=True, username=username, is_admin=user.is_admin)
 
 
@@ -1210,6 +1351,13 @@ async def create_job(request: Request) -> CreateJobResponse:
     user = current_user(request)
     prompt, uploads = await parse_create_job_request(request)
     validate_image_uploads(uploads)
+    logger.info(
+        "job.create_request owner=%s prompt_chars=%s upload_count=%s content_type=%s",
+        user.username,
+        len(prompt),
+        len(uploads),
+        request.headers.get("content-type", ""),
+    )
 
     job_id = uuid4().hex
     try:
@@ -1222,13 +1370,23 @@ async def create_job(request: Request) -> CreateJobResponse:
             requirement_path=requirement_path,
             image_paths=image_paths,
         )
+        logger.debug(
+            "job.files_created job_id=%s task_dir=%s requirement_path=%s scene_path=%s images=%s",
+            job_id,
+            task_dir,
+            requirement_path,
+            scene_path,
+            [str(path) for path in image_paths],
+        )
     except OSError as exc:
         if "task_dir" in locals():
             shutil.rmtree(task_dir, ignore_errors=True)
+        logger.exception("job.create_files_failed job_id=%s", job_id)
         raise HTTPException(status_code=500, detail=f"无法创建任务文件夹：{exc}") from exc
     except HTTPException:
         if "task_dir" in locals():
             shutil.rmtree(task_dir, ignore_errors=True)
+        logger.exception("job.create_validation_failed job_id=%s", job_id)
         raise
 
     codex_prompt = build_maycad_prompt(
@@ -1258,9 +1416,11 @@ async def create_job(request: Request) -> CreateJobResponse:
             insert_job(job)
     except sqlite3.Error as exc:
         shutil.rmtree(task_dir, ignore_errors=True)
+        logger.exception("job.insert_failed job_id=%s", job_id)
         raise HTTPException(status_code=500, detail=f"无法写入任务数据库：{exc}") from exc
 
     asyncio.create_task(execute_job(job_id, prompt, codex_prompt, image_paths))
+    logger.info("job.queued job_id=%s owner=%s task_dir=%s", job_id, job.owner, task_dir)
 
     return CreateJobResponse(
         accepted=True,

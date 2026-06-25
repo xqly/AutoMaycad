@@ -42,6 +42,51 @@ python -m pip install -r requirements.txt
 
 ## Run
 
+On this Windows machine, use the helper script:
+
+```powershell
+.\run.ps1
+```
+
+If PowerShell blocks local scripts, run it with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run.ps1
+```
+
+The script creates `.venv` when needed, installs dependencies, sets the local
+Codex-related paths, and starts the app at `http://127.0.0.1:12123`.
+
+To skip dependency installation on later runs:
+
+```powershell
+.\run.ps1 -SkipInstall
+```
+
+For detailed debug logs:
+
+```powershell
+.\run.ps1 -DebugMode
+```
+
+Debug mode sets `LOG_LEVEL=DEBUG`, streams Codex stdout/stderr into the app
+logs, raises the captured Codex output limit, and writes detailed logs to:
+
+```text
+logs\automaycad-debug.log
+```
+
+You can combine options:
+
+```powershell
+.\run.ps1 -SkipInstall -DebugMode -Port 12124
+```
+
+If the default port is already occupied, the script exits with a clear message;
+rerun it with another port such as `-Port 12124`.
+
+Manual start:
+
 ```powershell
 uvicorn app.main:app --reload
 ```
