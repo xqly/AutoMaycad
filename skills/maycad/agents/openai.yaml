@@ -1,0 +1,7 @@
+interface:
+  display_name: "MAYCAD"
+  short_description: "2D views to MAYCAD models"
+  default_prompt: "Use $maycad to turn my dimensions, text description, or reference image into 2D three-view drawings and a MAYCAD .scene model."
+
+policy:
+  allow_implicit_invocation: true
