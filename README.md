@@ -151,6 +151,28 @@ For exact argument control, especially on Windows, you can use JSON instead:
 $env:CODEX_ARGS_JSON = '["exec", "--skip-git-repo-check"]'
 ```
 
+## MAYCAD skill
+
+MAYCAD generation is grounded in the project-local skill at:
+
+```text
+skills\maycad
+```
+
+Each Codex task prompt points Codex at `skills\maycad\SKILL.md`, the scene XML
+reference, and the skill generator script. If Codex does not produce a scene,
+the server fallback loads:
+
+```text
+skills\maycad\scripts\generate_maycad_cabinet.py
+```
+
+To test or replace the skill without changing the repository copy:
+
+```powershell
+$env:MAYCAD_SKILL_DIR = "C:\path\to\maycad"
+```
+
 If Codex fails with `attempt to write a readonly database` or `access denied`
 under `C:\Users\xqly\.codex`, start Uvicorn from a normal user terminal rather
 than a sandboxed process, or set `CODEX_HOME` to a writable Codex state folder

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import hashlib
+import importlib.util
 import io
 import json
 import logging
@@ -29,12 +30,6 @@ from pydantic import BaseModel, Field
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from .codex_runner import CodexRunError, run_codex
-from scripts.generate_maycad_shelf import (
-    ShelfSceneBuilder,
-    generate_three_views,
-    remove_chinese_text,
-    safe_name,
-)
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -42,6 +37,14 @@ PROJECT_DIR = APP_DIR.parent
 STATIC_DIR = APP_DIR / "static"
 TASKS_DIR = Path(os.getenv("TASKS_DIR") or PROJECT_DIR / "tasks").expanduser().resolve()
 JOBS_DB_PATH = Path(os.getenv("JOBS_DB_PATH") or TASKS_DIR / "jobs.sqlite3").expanduser().resolve()
+MAYCAD_SKILL_DIR = (
+    Path(os.getenv("MAYCAD_SKILL_DIR") or PROJECT_DIR / "skills" / "maycad")
+    .expanduser()
+    .resolve()
+)
+MAYCAD_SKILL_DOC = MAYCAD_SKILL_DIR / "SKILL.md"
+MAYCAD_SKILL_SCENE_REFERENCE = MAYCAD_SKILL_DIR / "references" / "maycad-scene-format.md"
+MAYCAD_SKILL_GENERATOR = MAYCAD_SKILL_DIR / "scripts" / "generate_maycad_cabinet.py"
 MAX_PROMPT_LENGTH = 20_000
 MAX_IMAGE_COUNT = 8
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
@@ -61,6 +64,12 @@ DEFAULT_SHELF_DIMENSIONS_MM = {
     "height": 1800.0,
 }
 SHELF_KEYWORD_RE = re.compile(r"货架|架子|置物架|shelf|rack|display|storage", re.I)
+PANEL_KEYWORD_RE = re.compile(
+    r"层板|板件|板材|面板|侧板|顶板|底板|门板|抽屉面|木板|木|MDF|玻璃|亚克力|"
+    r"shelf panel|shelves|panel|board|wood|glass|acrylic",
+    re.I,
+)
+CHINESE_TEXT_RE = re.compile(r"[\u3000-\u303f\uff00-\uffef\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+")
 ALLOWED_IMAGE_TYPES = {
     "image/gif": ".gif",
     "image/jpeg": ".jpg",
@@ -798,8 +807,9 @@ def build_maycad_prompt(
         f"""\
         You are working on AutoMaycad task {job_id}.
 
-        The user input is a shelf/rack requirement. Generate a MAYCAD `.scene`
-        engineering file for the described shelf.
+        The user input is a shelf/rack/cabinet/frame requirement. Generate a
+        MAYCAD `.scene` engineering file for the described aluminum-profile
+        assembly.
 
         Required output:
         - Write the final MAYCAD scene file to exactly this path:
@@ -815,20 +825,31 @@ def build_maycad_prompt(
         - If the user wrote the requirement in Chinese, translate any
           human-readable `.scene` metadata to English before writing the file.
 
-        MAYCAD modeling instructions:
-        - Use the installed MAYCAD workflow if available: normalize the shelf
-          requirements, create/check a compact three-view drawing, then generate
-          the `.scene`.
-        - For supermarket, convenience-store, display, storage, or adjustable
-          shelf tasks, prefer this repository helper:
-          scripts/generate_maycad_shelf.py
+        MAYCAD skill instructions:
+        - Use the project-local MAYCAD skill as the source of truth:
+          {MAYCAD_SKILL_DOC}
+        - Follow the scene XML reference when constructing or debugging XML:
+          {MAYCAD_SKILL_SCENE_REFERENCE}
+        - Prefer the skill generator script for rectangular cabinet, frame,
+          rack, shelf, and storage assemblies:
+          {MAYCAD_SKILL_GENERATOR}
+        - Typical script flow:
+          1. Create a compact JSON spec inside the task folder.
+          2. Run the skill generator with that spec and this output folder.
+          3. Inspect the generated three-view HTML and `.scene` XML.
+        - Normalize the requirements, create/check a compact front/top/side
+          three-view drawing, then generate the `.scene`.
         - Treat dimensions as finished outer dimensions unless the user clearly
           says otherwise.
-        - Use X = length, Y = depth, Z = height.
+        - Use the MAYCAD skill coordinate convention:
+          X = length/front width, Z = width/depth, Y = height.
         - If details are missing, make practical assumptions and write them to a
           summary file in the task folder.
         - Default to 4040 aluminum profile and 18 mm MDF/wood panels when the
           user does not specify materials.
+        - If the task is based mainly on reference images or sketches, default
+          to a frame-only model unless the user explicitly asks for boards,
+          shelves, panels, glass/acrylic, MDF, or wood parts.
         - At the end, report the scene path and the generated files.
 
         Reference images attached to the initial prompt:
@@ -1035,7 +1056,38 @@ def parse_number_after_label(prompt: str, labels: tuple[str, ...]) -> float | No
     return float(match.group(1)) if match else None
 
 
-def parse_shelf_spec(job_id: str, prompt: str) -> dict | None:
+def parse_int_with_unit(prompt: str, units: tuple[str, ...]) -> int | None:
+    unit_pattern = "|".join(re.escape(unit) for unit in units)
+    match = re.search(rf"(?:共|做|要|有)?\s*(\d+)\s*(?:{unit_pattern})", prompt, re.I)
+    return int(match.group(1)) if match else None
+
+
+def remove_chinese_text(text: str) -> str:
+    return CHINESE_TEXT_RE.sub("", text)
+
+
+def load_maycad_skill_generator() -> object:
+    if not MAYCAD_SKILL_GENERATOR.is_file():
+        raise FileNotFoundError(f"Maycad skill generator not found: {MAYCAD_SKILL_GENERATOR}")
+
+    spec = importlib.util.spec_from_file_location(
+        "_automaycad_maycad_skill_generator",
+        MAYCAD_SKILL_GENERATOR,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load Maycad skill generator: {MAYCAD_SKILL_GENERATOR}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def parse_maycad_skill_spec(
+    job_id: str,
+    prompt: str,
+    *,
+    has_reference_images: bool = False,
+) -> dict | None:
     length = parse_number_after_label(prompt, ("长", "长度", "length", "l"))
     depth = parse_number_after_label(prompt, ("宽", "深", "宽度", "深度", "depth", "width", "d", "w"))
     height = parse_number_after_label(prompt, ("高", "高度", "height", "h"))
@@ -1068,10 +1120,14 @@ def parse_shelf_spec(job_id: str, prompt: str) -> dict | None:
             height = DEFAULT_SHELF_DIMENSIONS_MM["height"]
             defaulted_dimensions.append("height")
 
-    shelf_match = re.search(r"(?:共|做|要|有)?\s*(\d+)\s*层", prompt)
+    specified_shelf_count = parse_int_with_unit(prompt, ("层", "layer", "layers", "shelf", "shelves"))
+    specified_column_count = parse_int_with_unit(prompt, ("列", "格", "跨", "bay", "bays", "column", "columns"))
     load_match = re.search(r"(\d+(?:\.\d+)?)\s*kg", prompt, re.I)
-    shelf_count = int(shelf_match.group(1)) if shelf_match else 5
+    default_column_count = 2 if length >= 900 else 1
+    shelf_count = specified_shelf_count if specified_shelf_count is not None else 5
+    column_count = specified_column_count if specified_column_count is not None else default_column_count
     load_per_shelf = float(load_match.group(1)) if load_match else 40
+    include_panels = not has_reference_images or bool(PANEL_KEYWORD_RE.search(prompt))
     assumptions: list[str] = []
     if defaulted_dimensions:
         assumptions.append(
@@ -1079,51 +1135,86 @@ def parse_shelf_spec(job_id: str, prompt: str) -> dict | None:
             + ", ".join(defaulted_dimensions)
             + " defaulted to a practical shelf envelope of 1200 x 450 x 1800 mm."
         )
-    if shelf_match is None:
+    if "coordinate system" not in prompt.lower():
+        assumptions.append("Coordinate system follows the MAYCAD skill: X=length, Z=depth, Y=height.")
+    if specified_shelf_count is None:
         assumptions.append("Shelf count defaulted to 5 adjustable levels.")
+    if specified_column_count is None:
+        assumptions.append(f"Column/bay count defaulted to {column_count}.")
     if load_match is None:
         assumptions.append("Load rating defaulted to 40 kg per shelf.")
+    if has_reference_images and not include_panels:
+        assumptions.append(
+            "Reference-image tasks default to aluminum-profile frame-only output unless panels are explicitly requested."
+        )
+
+    bays = [
+        {
+            "name": f"bay {index + 1}",
+            "shelves": shelf_count if include_panels else 0,
+        }
+        for index in range(column_count)
+    ]
 
     return {
         "project_name": job_id,
-        "title": f"AutoMaycad Shelf Task {job_id}",
-        "description": "Auto-generated aluminum profile shelf scene from the task requirements.",
+        "title": f"AutoMaycad Task {job_id}",
+        "description": "Auto-generated aluminum-profile scene from the task requirements.",
+        "source": "reference image and text" if has_reference_images else "text",
         "finished_mm": {
             "length": length,
             "depth": depth,
             "height": height,
         },
-        "shelf_count": shelf_count,
-        "bay_count": 2 if length >= 900 else 1,
+        "coordinate_system": {"x": "length", "z": "depth/width", "y": "height"},
+        "columns": column_count,
+        "layers": shelf_count,
+        "bays": bays,
         "load_per_shelf_kg": load_per_shelf,
         "profile_size_mm": 40,
         "panel_thickness_mm": 18,
-        "include_diagonal_bracing": True,
+        "include_panels": include_panels,
         "assumptions": assumptions,
     }
 
 
-def run_local_shelf_generator(job_id: str, prompt: str, task_dir: Path) -> str | None:
-    spec = parse_shelf_spec(job_id, prompt)
-    if spec is None:
+def run_local_maycad_skill_generator(
+    job_id: str,
+    prompt: str,
+    task_dir: Path,
+    *,
+    has_reference_images: bool = False,
+) -> str | None:
+    skill_spec = parse_maycad_skill_spec(
+        job_id,
+        prompt,
+        has_reference_images=has_reference_images,
+    )
+    if skill_spec is None:
         return None
 
-    project_name = safe_name(spec["project_name"])
-    title = spec["title"]
-    description = spec["description"]
-    spec_path = task_dir / "shelf_spec.json"
+    try:
+        generator = load_maycad_skill_generator()
+    except (FileNotFoundError, RuntimeError, OSError) as exc:
+        logger.warning("job.skill_generator_unavailable job_id=%s error=%s", job_id, exc)
+        return None
+
+    project_name = generator.safe_name(skill_spec["project_name"])
+    title = skill_spec["title"]
+    description = skill_spec["description"]
+    spec_path = task_dir / "maycad_skill_spec.json"
     scene_path = task_dir / f"{project_name}.scene"
     html_path = task_dir / f"{project_name}_three_views.html"
     summary_path = task_dir / f"{project_name}_summary.json"
 
-    initial_assumptions = list(spec.get("assumptions", []))
-    builder = ShelfSceneBuilder(spec)
+    initial_assumptions = [str(item) for item in skill_spec.get("assumptions", [])]
+    builder = generator.SceneBuilder(skill_spec)
     built = builder.build()
-    spec["assumptions"] = [*initial_assumptions, *builder.assumptions]
+    skill_spec["assumptions"] = [*initial_assumptions, *builder.assumptions]
 
-    spec_path.write_text(json.dumps(spec, indent=2, ensure_ascii=False), encoding="utf-8")
-    scene_path.write_text(builder.scene_xml(title, description), encoding="utf-8")
-    html_path.write_text(generate_three_views(spec, built, title), encoding="utf-8")
+    spec_path.write_text(json.dumps(skill_spec, indent=2, ensure_ascii=False), encoding="utf-8")
+    scene_path.write_text(remove_chinese_text(builder.scene_xml(title, description)), encoding="utf-8")
+    html_path.write_text(generator.generate_three_views(skill_spec, built, title), encoding="utf-8")
     summary = {
         "project_name": project_name,
         "scene": str(scene_path),
@@ -1132,11 +1223,13 @@ def run_local_shelf_generator(job_id: str, prompt: str, task_dir: Path) -> str |
         "profiles": builder.profile_count,
         "panels": builder.panel_count,
         "built": built,
-        "assumptions": spec["assumptions"],
-        "generator": "local_fallback",
+        "assumptions": skill_spec["assumptions"],
+        "generator": "maycad_skill",
+        "skill_dir": str(MAYCAD_SKILL_DIR),
+        "skill_generator": str(MAYCAD_SKILL_GENERATOR),
     }
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
-    return f"本地 MAYCAD 货架生成器已写入 {scene_path}。"
+    return f"本地 MAYCAD skill 生成器已写入 {scene_path}。"
 
 
 async def execute_job(
@@ -1211,7 +1304,12 @@ async def execute_job(
 
     if status == JobStatus.FAILED and not scene_files(task_dir):
         logger.info("job.fallback_start job_id=%s", job_id)
-        fallback_result = run_local_shelf_generator(job_id, user_prompt, task_dir)
+        fallback_result = run_local_maycad_skill_generator(
+            job_id,
+            user_prompt,
+            task_dir,
+            has_reference_images=bool(image_paths),
+        )
         if fallback_result and scene_files(task_dir):
             status = JobStatus.SUCCEEDED
             result = "\n\n".join(item for item in (result, fallback_result) if item)
