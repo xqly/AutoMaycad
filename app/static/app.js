@@ -8,6 +8,7 @@ const accountName = document.querySelector("#account-name");
 const logoutButton = document.querySelector("#logout");
 const topNav = document.querySelector(".top-nav");
 const form = document.querySelector("#prompt-form");
+const taskNameInput = document.querySelector("#task-name");
 const promptInput = document.querySelector("#prompt");
 const imageInput = document.querySelector("#images");
 const imageList = document.querySelector("#image-list");
@@ -140,6 +141,10 @@ function jobsUrl(owner = "") {
 
 function statusLabel(status) {
   return statusLabels[status] || status;
+}
+
+function jobDisplayName(job) {
+  return job.display_name?.trim() || "未命名任务";
 }
 
 function translatePreviewText(text) {
@@ -424,7 +429,7 @@ function notifyJobCompletion(job) {
   }
 
   notifiedJobIds.add(job.id);
-  const title = `任务 ${job.id} 已完成`;
+  const title = `${jobDisplayName(job)} 已完成`;
   const body = job.finished_at ? `完成时间 ${formatDate(job.finished_at)}` : "scene文件已生成。";
   playCompletionSound();
   showToast(title, 6000);
@@ -769,14 +774,15 @@ function createJobCard(job, { detail = false } = {}) {
 
   const body = document.createElement("div");
   const title = document.createElement("h3");
+  const displayName = jobDisplayName(job);
 
   if (detail) {
-    title.textContent = `任务 ${job.id}`;
+    title.textContent = displayName;
   } else {
     const link = document.createElement("a");
     link.href = jobUrl(job.id);
     link.dataset.route = "";
-    link.textContent = `任务 ${job.id}`;
+    link.textContent = displayName;
     title.append(link);
   }
 
@@ -854,7 +860,7 @@ function renderJobOwnerFilter(users = []) {
 function renderJob(job) {
   showView(jobView);
   setActiveNav();
-  jobTitle.textContent = `任务 ${job.id}`;
+  jobTitle.textContent = jobDisplayName(job);
   jobDetailContainer.replaceChildren(createJobCard(job, { detail: true }));
 }
 
@@ -1034,7 +1040,14 @@ function schedulePoll(delay) {
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
 
+  const taskName = taskNameInput.value.trim();
   const prompt = promptInput.value.trim();
+  if (!taskName) {
+    setFormState("请先输入任务名称。");
+    taskNameInput.focus();
+    return;
+  }
+
   if (!prompt) {
     setFormState("请先输入需求。");
     promptInput.focus();
@@ -1050,6 +1063,7 @@ form.addEventListener("submit", async (event) => {
   }
 
   const formData = new FormData();
+  formData.append("task_name", taskName);
   formData.append("prompt", prompt);
   images.forEach((image) => {
     formData.append("images", image, image.name);
@@ -1070,14 +1084,14 @@ form.addEventListener("submit", async (event) => {
       throw new Error(await errorMessageFromResponse(response, "需求提交被拒绝。"));
     }
 
-    promptInput.value = "";
-    imageInput.value = "";
+    form.reset();
     renderImageList();
     const payload = await response.json();
     const detailPath = jobUrl(payload.job_id);
     knownJobStatuses.set(payload.job_id, payload.status);
-    setFormState(`任务 ${payload.job_id} 已创建。`);
-    showToast(`任务 ${payload.job_id} 创建成功。`);
+    const displayName = payload.display_name || taskName;
+    setFormState(`${displayName} 已创建。`);
+    showToast(`${displayName} 创建成功。`);
     window.setTimeout(() => routeTo(detailPath), 650);
   } catch (error) {
     if (error instanceof UnauthorizedError) {
