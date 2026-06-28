@@ -91,7 +91,7 @@ $UvicornArgs = @(
 )
 
 if ($Reload) {
-    Write-Host "Reload mode enabled. Avoid creating Codex jobs in this mode on Windows."
+    Write-Host "Reload mode enabled. Avoid creating 画图大模型 jobs in this mode on Windows."
     $UvicornArgs += @(
         "--reload",
         "--reload-dir", $ReloadAppDir,
@@ -100,5 +100,4 @@ if ($Reload) {
 }
 
 & $PythonExe -m uvicorn @UvicornArgs
-
 

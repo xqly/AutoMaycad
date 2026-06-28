@@ -29,7 +29,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
-from .codex_runner import CodexRunError, run_codex
+from .drawing_model_runner import (
+    MODEL_DISPLAY_NAME,
+    DrawingModelRunError,
+    display_model_text,
+    run_drawing_model,
+)
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -49,7 +54,7 @@ MAX_PROMPT_LENGTH = 20_000
 MAX_IMAGE_COUNT = 8
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 IMAGE_CHUNK_BYTES = 1024 * 1024
-HIDDEN_GENERATED_FILES = {"codex_prompt.md", "shelf_requirements.md"}
+HIDDEN_GENERATED_FILES = {"codex_prompt.md", "drawing_model_prompt.md", "shelf_requirements.md"}
 IMAGE_INPUT_DIR = "input_images"
 SESSION_COOKIE_NAME = "automaycad_session"
 SESSION_SECRET = os.getenv("SESSION_SECRET") or secrets.token_hex(32)
@@ -208,25 +213,27 @@ async def log_requests(request: Request, call_next: Callable) -> Response:
     path = request.url.path
     if request.url.query:
         path = f"{path}?{request.url.query}"
+    log_path = display_model_text(path)
 
     logger.debug(
         "request.start method=%s path=%s client=%s content_length=%s",
         request.method,
-        path,
+        log_path,
         client,
         request.headers.get("content-length", "-"),
     )
 
     try:
         response = await call_next(request)
-    except Exception:
+    except Exception as exc:
         duration_ms = (time.perf_counter() - started_at) * 1000
-        logger.exception(
-            "request.error method=%s path=%s client=%s duration_ms=%.1f",
+        logger.error(
+            "request.error method=%s path=%s client=%s duration_ms=%.1f error=%s",
             request.method,
-            path,
+            log_path,
             client,
             duration_ms,
+            display_model_text(str(exc)),
         )
         raise
 
@@ -235,7 +242,7 @@ async def log_requests(request: Request, call_next: Callable) -> Response:
     log(
         "request.finish method=%s path=%s status=%s duration_ms=%.1f client=%s",
         request.method,
-        path,
+        log_path,
         response.status_code,
         duration_ms,
         client,
@@ -727,7 +734,7 @@ async def save_image_uploads(
         image_paths.append(target_path)
         logger.debug(
             "upload.saved path=%s content_type=%s bytes=%s",
-            target_path,
+            display_model_text(str(target_path)),
             upload.content_type,
             written_bytes,
         )
@@ -941,7 +948,7 @@ def task_completion_check(task_dir: Path, stable_seconds: float = 5.0) -> Callab
             stable_since = now
             logger.debug(
                 "job.scene_seen task_dir=%s scenes=%s waiting_for_stable_seconds=%.1f",
-                task_dir,
+                display_model_text(str(task_dir)),
                 scenes,
                 stable_seconds,
             )
@@ -949,7 +956,7 @@ def task_completion_check(task_dir: Path, stable_seconds: float = 5.0) -> Callab
 
         stable = now - stable_since >= stable_seconds
         if stable:
-            logger.debug("job.scene_stable task_dir=%s scenes=%s", task_dir, scenes)
+            logger.debug("job.scene_stable task_dir=%s scenes=%s", display_model_text(str(task_dir)), scenes)
         return stable
 
     return check
@@ -965,7 +972,12 @@ def refresh_job_files(job: Job) -> bool:
 
 
 def job_to_response(job: Job) -> JobResponse:
-    return JobResponse(**asdict(job))
+    response = asdict(job)
+    for key in ("prompt_preview", "task_dir", "requirement_path", "scene_path", "result", "error"):
+        value = response.get(key)
+        if isinstance(value, str):
+            response[key] = display_model_text(value)
+    return JobResponse(**response)
 
 
 def build_job_archive(task_dir: Path) -> io.BytesIO:
@@ -1196,7 +1208,7 @@ def run_local_maycad_skill_generator(
     try:
         generator = load_maycad_skill_generator()
     except (FileNotFoundError, RuntimeError, OSError) as exc:
-        logger.warning("job.skill_generator_unavailable job_id=%s error=%s", job_id, exc)
+        logger.warning("job.skill_generator_unavailable job_id=%s error=%s", job_id, display_model_text(str(exc)))
         return None
 
     project_name = generator.safe_name(skill_spec["project_name"])
@@ -1235,14 +1247,14 @@ def run_local_maycad_skill_generator(
 async def execute_job(
     job_id: str,
     user_prompt: str,
-    codex_prompt: str,
+    model_prompt: str,
     image_paths: list[Path] | None = None,
 ) -> None:
     logger.info(
-        "job.start job_id=%s prompt_chars=%s codex_prompt_chars=%s image_count=%s",
+        "job.start job_id=%s prompt_chars=%s model_prompt_chars=%s image_count=%s",
         job_id,
         len(user_prompt),
-        len(codex_prompt),
+        len(model_prompt),
         len(image_paths or []),
     )
     async with jobs_lock:
@@ -1254,25 +1266,24 @@ async def execute_job(
         job.started_at = utc_now()
         task_dir = Path(job.task_dir)
         save_job(job)
-        logger.debug("job.running job_id=%s task_dir=%s", job_id, task_dir)
+        logger.debug("job.running job_id=%s task_dir=%s", job_id, display_model_text(str(task_dir)))
 
     result: str | None = None
     error: str | None = None
     try:
-        result = await run_codex(
-            codex_prompt,
+        result = await run_drawing_model(
+            model_prompt,
             image_paths=[str(path) for path in image_paths or []],
             completion_check=task_completion_check(task_dir),
             activity_snapshot=lambda: task_activity_snapshot(task_dir),
         )
-    except CodexRunError as exc:
+    except DrawingModelRunError as exc:
         result = exc.output or None
         logger.warning(
-            "job.codex_error job_id=%s error=%s output_chars=%s",
+            "job.model_error job_id=%s error=%s output_chars=%s",
             job_id,
-            exc,
+            display_model_text(str(exc)),
             len(result or ""),
-            exc_info=DEBUG_MODE,
         )
         if scene_files(task_dir):
             status = JobStatus.SUCCEEDED
@@ -1281,17 +1292,17 @@ async def execute_job(
                 item
                 for item in (
                     result,
-                    f"Codex 返回异常（{exc}），但任务目录中已找到 .scene 文件，按生成成功处理。",
+                    f"{MODEL_DISPLAY_NAME}返回异常（{display_model_text(str(exc))}），但任务目录中已找到 .scene 文件，按生成成功处理。",
                 )
                 if item
             )
         else:
             status = JobStatus.FAILED
-            error = str(exc)
+            error = display_model_text(str(exc))
     else:
         scenes = scene_files(task_dir)
         logger.debug(
-            "job.codex_finished job_id=%s output_chars=%s scene_count=%s",
+            "job.model_finished job_id=%s output_chars=%s scene_count=%s",
             job_id,
             len(result or ""),
             len(scenes),
@@ -1300,7 +1311,7 @@ async def execute_job(
             status = JobStatus.SUCCEEDED
         else:
             status = JobStatus.FAILED
-            error = "Codex 已完成，但任务文件夹中未找到 .scene 文件。"
+            error = f"{MODEL_DISPLAY_NAME}已完成，但任务文件夹中未找到 .scene 文件。"
 
     if status == JobStatus.FAILED and not scene_files(task_dir):
         logger.info("job.fallback_start job_id=%s", job_id)
@@ -1328,8 +1339,8 @@ async def execute_job(
             return
         job.status = status
         job.finished_at = utc_now()
-        job.result = result
-        job.error = error
+        job.result = display_model_text(result) if result else result
+        job.error = display_model_text(error) if error else error
         job.generated_files = generated_files(Path(job.task_dir))
         save_job(job)
         logger.info(
@@ -1337,20 +1348,20 @@ async def execute_job(
             job_id,
             status.value,
             job.generated_files,
-            error,
+            display_model_text(error) if error else error,
         )
 
 
 @app.on_event("startup")
 async def load_recovered_jobs() -> None:
     logger.info(
-        "app.startup debug=%s log_level=%s project_dir=%s tasks_dir=%s jobs_db=%s codex_home=%s",
+        "app.startup debug=%s log_level=%s project_dir=%s tasks_dir=%s jobs_db=%s model_home=%s",
         DEBUG_MODE,
         logging.getLevelName(LOG_LEVEL),
-        PROJECT_DIR,
-        TASKS_DIR,
-        JOBS_DB_PATH,
-        os.getenv("CODEX_HOME", ""),
+        display_model_text(str(PROJECT_DIR)),
+        display_model_text(str(TASKS_DIR)),
+        display_model_text(str(JOBS_DB_PATH)),
+        display_model_text(os.getenv("CODEX_HOME", "")),
     )
     async with jobs_lock:
         init_jobs_db()
@@ -1471,23 +1482,23 @@ async def create_job(request: Request) -> CreateJobResponse:
         logger.debug(
             "job.files_created job_id=%s task_dir=%s requirement_path=%s scene_path=%s images=%s",
             job_id,
-            task_dir,
-            requirement_path,
-            scene_path,
-            [str(path) for path in image_paths],
+            display_model_text(str(task_dir)),
+            display_model_text(str(requirement_path)),
+            display_model_text(str(scene_path)),
+            [display_model_text(str(path)) for path in image_paths],
         )
     except OSError as exc:
         if "task_dir" in locals():
             shutil.rmtree(task_dir, ignore_errors=True)
-        logger.exception("job.create_files_failed job_id=%s", job_id)
-        raise HTTPException(status_code=500, detail=f"无法创建任务文件夹：{exc}") from exc
-    except HTTPException:
+        logger.error("job.create_files_failed job_id=%s error=%s", job_id, display_model_text(str(exc)))
+        raise HTTPException(status_code=500, detail=f"无法创建任务文件夹：{display_model_text(str(exc))}") from exc
+    except HTTPException as exc:
         if "task_dir" in locals():
             shutil.rmtree(task_dir, ignore_errors=True)
-        logger.exception("job.create_validation_failed job_id=%s", job_id)
+        logger.warning("job.create_validation_failed job_id=%s error=%s", job_id, display_model_text(str(exc.detail)))
         raise
 
-    codex_prompt = build_maycad_prompt(
+    model_prompt = build_maycad_prompt(
         job_id=job_id,
         user_prompt=prompt,
         task_dir=task_dir,
@@ -1495,7 +1506,7 @@ async def create_job(request: Request) -> CreateJobResponse:
         scene_path=scene_path,
         image_paths=image_paths,
     )
-    (task_dir / "codex_prompt.md").write_text(codex_prompt, encoding="utf-8")
+    (task_dir / "drawing_model_prompt.md").write_text(model_prompt, encoding="utf-8")
 
     job = Job(
         id=job_id,
@@ -1514,18 +1525,18 @@ async def create_job(request: Request) -> CreateJobResponse:
             insert_job(job)
     except sqlite3.Error as exc:
         shutil.rmtree(task_dir, ignore_errors=True)
-        logger.exception("job.insert_failed job_id=%s", job_id)
-        raise HTTPException(status_code=500, detail=f"无法写入任务数据库：{exc}") from exc
+        logger.error("job.insert_failed job_id=%s error=%s", job_id, display_model_text(str(exc)))
+        raise HTTPException(status_code=500, detail=f"无法写入任务数据库：{display_model_text(str(exc))}") from exc
 
-    asyncio.create_task(execute_job(job_id, prompt, codex_prompt, image_paths))
-    logger.info("job.queued job_id=%s owner=%s task_dir=%s", job_id, job.owner, task_dir)
+    asyncio.create_task(execute_job(job_id, prompt, model_prompt, image_paths))
+    logger.info("job.queued job_id=%s owner=%s task_dir=%s", job_id, job.owner, display_model_text(str(task_dir)))
 
     return CreateJobResponse(
         accepted=True,
         job_id=job_id,
-        task_dir=str(task_dir),
-        requirement_path=str(requirement_path),
-        scene_path=str(scene_path),
+        task_dir=display_model_text(str(task_dir)),
+        requirement_path=display_model_text(str(requirement_path)),
+        scene_path=display_model_text(str(scene_path)),
         owner=job.owner,
         status=job.status,
     )
