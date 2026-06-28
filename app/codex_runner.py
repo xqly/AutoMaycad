@@ -12,7 +12,7 @@ from pathlib import Path
 
 DEFAULT_MAX_RUNTIME_SECONDS = 1800
 DEFAULT_IDLE_TIMEOUT_SECONDS = 600
-DEFAULT_CODEX_ARGS = "exec --skip-git-repo-check"
+DEFAULT_CODEX_ARGS = "exec --skip-git-repo-check --sandbox workspace-write --ask-for-approval never"
 DEFAULT_CODEX_HOME = Path("C:/Users/xqly/.codex")
 DEFAULT_OUTPUT_LIMIT_CHARS = 50_000
 POLL_SECONDS = 1.0
@@ -112,6 +112,28 @@ def _truthy_env(name: str) -> bool:
     return os.getenv(name, "").lower() in {"1", "true", "yes", "on"}
 
 
+def _with_default_exec_permissions(args: list[str]) -> list[str]:
+    if not args or args[0] != "exec":
+        return args
+
+    has_full_access = any(
+        arg in {"--dangerously-bypass-approvals-and-sandbox", "--yolo", "--full-auto"}
+        for arg in args
+    )
+    has_sandbox = any(arg in {"--sandbox", "-s"} or arg.startswith("--sandbox=") for arg in args)
+    has_approval = any(
+        arg in {"--ask-for-approval", "-a"} or arg.startswith("--ask-for-approval=")
+        for arg in args
+    )
+
+    normalized_args = list(args)
+    if not has_sandbox and not has_full_access:
+        normalized_args.extend(["--sandbox", "workspace-write"])
+    if not has_approval and not has_full_access:
+        normalized_args.extend(["--ask-for-approval", "never"])
+    return normalized_args
+
+
 def _log_text_chunk(stream_name: str, chunk: bytes) -> None:
     if not _truthy_env("AUTOMAYCAD_LOG_CODEX_STREAMS"):
         return
@@ -139,6 +161,8 @@ def _command(image_paths: list[str] | None = None) -> list[str]:
         args = parsed_args
     else:
         args = shlex.split(os.getenv("CODEX_ARGS", DEFAULT_CODEX_ARGS))
+
+    args = _with_default_exec_permissions(args)
 
     image_args: list[str] = []
     for image_path in image_paths or []:

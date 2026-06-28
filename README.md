@@ -102,7 +102,7 @@ http://127.0.0.1:8000
 By default the server runs:
 
 ```text
-<bundled codex> exec --skip-git-repo-check
+<bundled codex> exec --skip-git-repo-check --sandbox workspace-write --ask-for-approval never
 ```
 
 The prompt is piped to Codex on stdin. This avoids CLI argument parsing
@@ -123,7 +123,7 @@ You can change this with environment variables:
 
 ```powershell
 $env:CODEX_COMMAND = "codex"
-$env:CODEX_ARGS = "exec --skip-git-repo-check"
+$env:CODEX_ARGS = "exec --skip-git-repo-check --sandbox workspace-write --ask-for-approval never"
 $env:CODEX_MAX_RUNTIME_SECONDS = "1800"
 $env:CODEX_IDLE_TIMEOUT_SECONDS = "600"
 $env:CODEX_OUTPUT_LIMIT_CHARS = "50000"
@@ -148,7 +148,7 @@ fallback for the maximum runtime.
 For exact argument control, especially on Windows, you can use JSON instead:
 
 ```powershell
-$env:CODEX_ARGS_JSON = '["exec", "--skip-git-repo-check"]'
+$env:CODEX_ARGS_JSON = '["exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "--ask-for-approval", "never"]'
 ```
 
 ## MAYCAD skill

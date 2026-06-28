@@ -56,6 +56,10 @@ if (-not $env:CODEX_WORKDIR) {
     $env:CODEX_WORKDIR = $ProjectRoot
 }
 
+if (-not $env:CODEX_ARGS) {
+    $env:CODEX_ARGS = "exec --skip-git-repo-check --sandbox workspace-write --ask-for-approval never"
+}
+
 if (-not $env:TASKS_DIR) {
     $env:TASKS_DIR = Join-Path $ProjectRoot "tasks"
 }
@@ -100,5 +104,4 @@ if ($Reload) {
 }
 
 & $PythonExe -m uvicorn @UvicornArgs
-
 

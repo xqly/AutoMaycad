@@ -70,6 +70,7 @@ if [[ "$SKIP_INSTALL" != "1" ]]; then
 fi
 
 export CODEX_WORKDIR="${CODEX_WORKDIR:-$PROJECT_ROOT}"
+export CODEX_ARGS="${CODEX_ARGS:-exec --skip-git-repo-check --sandbox workspace-write --ask-for-approval never}"
 export TASKS_DIR="${TASKS_DIR:-$PROJECT_ROOT/tasks}"
 export JOBS_DB_PATH="${JOBS_DB_PATH:-$TASKS_DIR/jobs.sqlite3}"
 
