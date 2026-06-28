@@ -57,7 +57,7 @@ if (-not $env:CODEX_WORKDIR) {
 }
 
 if (-not $env:CODEX_ARGS) {
-    $env:CODEX_ARGS = "exec --skip-git-repo-check --sandbox workspace-write --ask-for-approval never"
+    $env:CODEX_ARGS = "exec --skip-git-repo-check --sandbox workspace-write"
 }
 
 if (-not $env:TASKS_DIR) {
@@ -104,4 +104,3 @@ if ($Reload) {
 }
 
 & $PythonExe -m uvicorn @UvicornArgs
-

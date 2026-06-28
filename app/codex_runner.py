@@ -12,7 +12,7 @@ from pathlib import Path
 
 DEFAULT_MAX_RUNTIME_SECONDS = 1800
 DEFAULT_IDLE_TIMEOUT_SECONDS = 600
-DEFAULT_CODEX_ARGS = "exec --skip-git-repo-check --sandbox workspace-write --ask-for-approval never"
+DEFAULT_CODEX_ARGS = "exec --skip-git-repo-check --sandbox workspace-write"
 DEFAULT_CODEX_HOME = Path("C:/Users/xqly/.codex")
 DEFAULT_OUTPUT_LIMIT_CHARS = 50_000
 POLL_SECONDS = 1.0
@@ -112,25 +112,46 @@ def _truthy_env(name: str) -> bool:
     return os.getenv(name, "").lower() in {"1", "true", "yes", "on"}
 
 
+def _without_legacy_approval_args(args: list[str]) -> list[str]:
+    normalized_args: list[str] = []
+    index = 0
+    removed = False
+
+    while index < len(args):
+        arg = args[index]
+        if arg.startswith("--ask-for-approval="):
+            removed = True
+            index += 1
+            continue
+        if arg in {"--ask-for-approval", "-a"}:
+            removed = True
+            index += 1
+            if index < len(args) and not args[index].startswith("-"):
+                index += 1
+            continue
+
+        normalized_args.append(arg)
+        index += 1
+
+    if removed:
+        logger.warning("codex.legacy_approval_args_removed")
+    return normalized_args
+
+
 def _with_default_exec_permissions(args: list[str]) -> list[str]:
     if not args or args[0] != "exec":
         return args
 
+    args = _without_legacy_approval_args(args)
     has_full_access = any(
         arg in {"--dangerously-bypass-approvals-and-sandbox", "--yolo", "--full-auto"}
         for arg in args
     )
     has_sandbox = any(arg in {"--sandbox", "-s"} or arg.startswith("--sandbox=") for arg in args)
-    has_approval = any(
-        arg in {"--ask-for-approval", "-a"} or arg.startswith("--ask-for-approval=")
-        for arg in args
-    )
 
     normalized_args = list(args)
     if not has_sandbox and not has_full_access:
         normalized_args.extend(["--sandbox", "workspace-write"])
-    if not has_approval and not has_full_access:
-        normalized_args.extend(["--ask-for-approval", "never"])
     return normalized_args
 
 
