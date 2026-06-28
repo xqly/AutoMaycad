@@ -46,6 +46,8 @@ MAYCAD_SKILL_DOC = MAYCAD_SKILL_DIR / "SKILL.md"
 MAYCAD_SKILL_SCENE_REFERENCE = MAYCAD_SKILL_DIR / "references" / "maycad-scene-format.md"
 MAYCAD_SKILL_GENERATOR = MAYCAD_SKILL_DIR / "scripts" / "generate_maycad_cabinet.py"
 MAX_PROMPT_LENGTH = 20_000
+MAX_DISPLAY_NAME_LENGTH = 120
+DEFAULT_DISPLAY_NAME = "未命名任务"
 MAX_IMAGE_COUNT = 8
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 IMAGE_CHUNK_BYTES = 1024 * 1024
@@ -124,6 +126,7 @@ class JobStatus(StrEnum):
 @dataclass(slots=True)
 class Job:
     id: str
+    display_name: str
     prompt_preview: str
     task_dir: str
     requirement_path: str
@@ -140,6 +143,7 @@ class Job:
 
 class CreateJobRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=MAX_PROMPT_LENGTH)
+    task_name: str | None = Field(default=None, max_length=MAX_DISPLAY_NAME_LENGTH)
 
 
 class LoginRequest(BaseModel):
@@ -172,6 +176,7 @@ class UserResponse(BaseModel):
 class CreateJobResponse(BaseModel):
     accepted: Literal[True]
     job_id: str
+    display_name: str
     task_dir: str
     requirement_path: str
     scene_path: str
@@ -181,6 +186,7 @@ class CreateJobResponse(BaseModel):
 
 class JobResponse(BaseModel):
     id: str
+    display_name: str
     prompt_preview: str
     task_dir: str
     requirement_path: str
@@ -463,6 +469,10 @@ def ensure_jobs_schema(connection: sqlite3.Connection) -> None:
         row["name"]
         for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
     }
+    if "display_name" not in columns:
+        connection.execute(
+            "ALTER TABLE jobs ADD COLUMN display_name TEXT NOT NULL DEFAULT '未命名任务'"
+        )
     if "owner" not in columns:
         connection.execute("ALTER TABLE jobs ADD COLUMN owner TEXT NOT NULL DEFAULT 'admin'")
 
@@ -474,6 +484,7 @@ def init_jobs_db() -> None:
             """
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL DEFAULT '未命名任务',
                 prompt_preview TEXT NOT NULL,
                 task_dir TEXT NOT NULL,
                 requirement_path TEXT NOT NULL,
@@ -516,6 +527,7 @@ def decode_generated_files(value: str | None) -> list[str]:
 def job_from_row(row: sqlite3.Row) -> Job:
     return Job(
         id=row["id"],
+        display_name=row["display_name"] or DEFAULT_DISPLAY_NAME,
         prompt_preview=row["prompt_preview"],
         task_dir=row["task_dir"],
         requirement_path=row["requirement_path"],
@@ -537,6 +549,7 @@ def insert_job(job: Job) -> None:
             """
             INSERT INTO jobs (
                 id,
+                display_name,
                 prompt_preview,
                 task_dir,
                 requirement_path,
@@ -551,10 +564,11 @@ def insert_job(job: Job) -> None:
                 generated_files,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job.id,
+                job.display_name,
                 job.prompt_preview,
                 job.task_dir,
                 job.requirement_path,
@@ -577,7 +591,8 @@ def save_job(job: Job) -> None:
         connection.execute(
             """
             UPDATE jobs
-            SET prompt_preview = ?,
+            SET display_name = ?,
+                prompt_preview = ?,
                 task_dir = ?,
                 requirement_path = ?,
                 scene_path = ?,
@@ -593,6 +608,7 @@ def save_job(job: Job) -> None:
             WHERE id = ?
             """,
             (
+                job.display_name,
                 job.prompt_preview,
                 job.task_dir,
                 job.requirement_path,
@@ -658,24 +674,35 @@ def validate_prompt(prompt: str) -> str:
     return prompt
 
 
-async def parse_create_job_request(request: Request) -> tuple[str, list[StarletteUploadFile]]:
+def validate_display_name(display_name: str | None) -> str:
+    display_name = (display_name or "").strip()
+    if not display_name:
+        return DEFAULT_DISPLAY_NAME
+    if len(display_name) > MAX_DISPLAY_NAME_LENGTH:
+        raise HTTPException(status_code=422, detail=f"任务名称不能超过 {MAX_DISPLAY_NAME_LENGTH} 个字符。")
+    return display_name
+
+
+async def parse_create_job_request(request: Request) -> tuple[str, str, list[StarletteUploadFile]]:
     content_type = request.headers.get("content-type", "").lower()
     if content_type.startswith("multipart/form-data"):
         form = await request.form()
         prompt_value = form.get("prompt")
+        task_name_value = form.get("task_name") or form.get("display_name")
         prompt = prompt_value if isinstance(prompt_value, str) else ""
+        task_name = task_name_value if isinstance(task_name_value, str) else None
         uploads = [
             item
             for item in form.getlist("images")
             if isinstance(item, StarletteUploadFile) and item.filename
         ]
-        return validate_prompt(prompt), uploads
+        return validate_prompt(prompt), validate_display_name(task_name), uploads
 
     try:
         payload = CreateJobRequest.model_validate(await request.json())
     except Exception as exc:
         raise HTTPException(status_code=422, detail="请求体必须包含 prompt。") from exc
-    return validate_prompt(payload.prompt), []
+    return validate_prompt(payload.prompt), validate_display_name(payload.task_name), []
 
 
 def validate_image_uploads(uploads: list[StarletteUploadFile]) -> None:
@@ -1019,6 +1046,7 @@ def recover_jobs_from_disk() -> None:
 
         insert_job(Job(
             id=job_id,
+            display_name=DEFAULT_DISPLAY_NAME,
             prompt_preview=preview_prompt(prompt) if prompt else f"已恢复任务 {job_id}",
             task_dir=str(task_dir.resolve()),
             requirement_path=str(requirement_path.resolve()),
@@ -1447,11 +1475,12 @@ async def create_user(request: Request, payload: CreateUserRequest) -> UserRespo
 @app.post("/api/jobs", response_model=CreateJobResponse, status_code=202)
 async def create_job(request: Request) -> CreateJobResponse:
     user = current_user(request)
-    prompt, uploads = await parse_create_job_request(request)
+    prompt, display_name, uploads = await parse_create_job_request(request)
     validate_image_uploads(uploads)
     logger.info(
-        "job.create_request owner=%s prompt_chars=%s upload_count=%s content_type=%s",
+        "job.create_request owner=%s display_name=%s prompt_chars=%s upload_count=%s content_type=%s",
         user.username,
+        display_name,
         len(prompt),
         len(uploads),
         request.headers.get("content-type", ""),
@@ -1499,6 +1528,7 @@ async def create_job(request: Request) -> CreateJobResponse:
 
     job = Job(
         id=job_id,
+        display_name=display_name,
         prompt_preview=preview_prompt(prompt),
         task_dir=str(task_dir),
         requirement_path=str(requirement_path),
@@ -1523,6 +1553,7 @@ async def create_job(request: Request) -> CreateJobResponse:
     return CreateJobResponse(
         accepted=True,
         job_id=job_id,
+        display_name=job.display_name,
         task_dir=str(task_dir),
         requirement_path=str(requirement_path),
         scene_path=str(scene_path),
