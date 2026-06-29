@@ -49,7 +49,21 @@ if (-not $SkipInstall) {
 }
 
 if (-not $env:CODEX_HOME) {
-    $env:CODEX_HOME = "C:\Users\xqly\.codex"
+    $CodexHomeCandidates = @()
+    if ($env:USERPROFILE) {
+        $CodexHomeCandidates += (Join-Path $env:USERPROFILE ".codex")
+    }
+    if ($env:HOME) {
+        $CodexHomeCandidates += (Join-Path $env:HOME ".codex")
+    }
+    $CodexHomeCandidates += "C:\Users\xqly\.codex"
+
+    foreach ($CodexHomeCandidate in $CodexHomeCandidates) {
+        if ($CodexHomeCandidate -and (Test-Path $CodexHomeCandidate)) {
+            $env:CODEX_HOME = $CodexHomeCandidate
+            break
+        }
+    }
 }
 
 if (-not $env:CODEX_WORKDIR) {

@@ -111,13 +111,16 @@ provided` even when the application has built a valid task prompt.
 
 The bundled Codex binary comes from the `openai-codex` Python package installed in this project's virtual environment. This avoids the WindowsApps `codex.exe` launcher if that launcher is blocked by Windows permissions.
 
-On this machine the app also defaults Codex state to:
+When `CODEX_HOME` is not set, the app tries to reuse an existing Codex state
+folder for the current Windows user:
 
 ```text
-C:\Users\xqly\.codex
+%USERPROFILE%\.codex
 ```
 
-That lets the background Codex process reuse the Codex login already present on the computer.
+If that folder does not exist, Codex falls back to its own default behavior. Set
+`CODEX_HOME` explicitly when the app must reuse a login from another writable
+Codex state folder.
 
 You can change this with environment variables:
 
@@ -128,7 +131,7 @@ $env:CODEX_MAX_RUNTIME_SECONDS = "1800"
 $env:CODEX_IDLE_TIMEOUT_SECONDS = "600"
 $env:CODEX_OUTPUT_LIMIT_CHARS = "50000"
 $env:CODEX_WORKDIR = "C:\path\to\workspace"
-$env:CODEX_HOME = "C:\Users\xqly\.codex"
+$env:CODEX_HOME = "$env:USERPROFILE\.codex"
 $env:TASKS_DIR = "C:\path\to\workspace\tasks"
 $env:JOBS_DB_PATH = "C:\path\to\workspace\tasks\jobs.sqlite3"
 uvicorn app.main:app --reload
@@ -173,10 +176,10 @@ To test or replace the skill without changing the repository copy:
 $env:MAYCAD_SKILL_DIR = "C:\path\to\maycad"
 ```
 
-If Codex fails with `attempt to write a readonly database` or `access denied`
-under `C:\Users\xqly\.codex`, start Uvicorn from a normal user terminal rather
-than a sandboxed process, or set `CODEX_HOME` to a writable Codex state folder
-that has valid authentication.
+If Codex fails with `attempt to write a readonly database`, `access denied`, or
+`CODEX_HOME points to ... but that path does not exist`, start Uvicorn from the
+same Windows user that ran `codex login`, or set `CODEX_HOME` to a writable
+Codex state folder that exists and has valid authentication.
 
 ## Security note
 

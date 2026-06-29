@@ -13,7 +13,7 @@ from pathlib import Path
 DEFAULT_MAX_RUNTIME_SECONDS = 1800
 DEFAULT_IDLE_TIMEOUT_SECONDS = 600
 DEFAULT_CODEX_ARGS = "exec --skip-git-repo-check --sandbox workspace-write"
-DEFAULT_CODEX_HOME = Path("C:/Users/xqly/.codex")
+LEGACY_CODEX_HOME = Path("C:/Users/xqly/.codex")
 DEFAULT_OUTPUT_LIMIT_CHARS = 50_000
 POLL_SECONDS = 1.0
 GRACEFUL_SHUTDOWN_SECONDS = 10.0
@@ -101,10 +101,17 @@ def _codex_environment() -> dict[str, str]:
     if bundled_path_dir:
         env["PATH"] = f"{bundled_path_dir}{os.pathsep}{env.get('PATH', '')}"
     codex_home = env.get("CODEX_HOME", "")
-    if DEFAULT_CODEX_HOME.exists() and (
-        not codex_home or "CodexSandboxOffline" in codex_home
-    ):
-        env["CODEX_HOME"] = str(DEFAULT_CODEX_HOME)
+    use_candidate_home = not codex_home or "CodexSandboxOffline" in codex_home
+    if codex_home and not use_candidate_home and not Path(codex_home).expanduser().exists():
+        logger.warning("codex.invalid_home_ignored path=%s", codex_home)
+        env.pop("CODEX_HOME", None)
+        use_candidate_home = True
+    if use_candidate_home:
+        home = Path.home() / ".codex"
+        for candidate in (home, LEGACY_CODEX_HOME):
+            if candidate.exists():
+                env["CODEX_HOME"] = str(candidate)
+                break
     return env
 
 
