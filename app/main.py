@@ -51,7 +51,8 @@ DEFAULT_DISPLAY_NAME = "未命名任务"
 MAX_IMAGE_COUNT = 8
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 IMAGE_CHUNK_BYTES = 1024 * 1024
-HIDDEN_GENERATED_FILES = {"codex_prompt.md", "shelf_requirements.md"}
+TASK_COMPLETE_FILE = "task_complete.json"
+HIDDEN_GENERATED_FILES = {"codex_prompt.md", "shelf_requirements.md", TASK_COMPLETE_FILE}
 IMAGE_INPUT_DIR = "input_images"
 SESSION_COOKIE_NAME = "automaycad_session"
 SESSION_SECRET = os.getenv("SESSION_SECRET") or secrets.token_hex(32)
@@ -825,6 +826,7 @@ def build_maycad_prompt(
     image_paths: list[Path] | None = None,
 ) -> str:
     image_paths = image_paths or []
+    completion_marker_path = task_dir / TASK_COMPLETE_FILE
     image_section = (
         "\n".join(image_lines(image_paths, task_dir))
         if image_paths
@@ -851,6 +853,13 @@ def build_maycad_prompt(
           labels, comments, CDATA text, and descriptions inside the `.scene`.
         - If the user wrote the requirement in Chinese, translate any
           human-readable `.scene` metadata to English before writing the file.
+        - Only after the scene and all supporting files are final, write a
+          completion marker to exactly this path:
+          {completion_marker_path}
+          The marker must be UTF-8 JSON with at least:
+          {{"status":"complete","scene":"{scene_path}","verified":true}}
+          Do not create this marker until all generation, edits, checks, and
+          summaries are finished.
 
         MAYCAD skill instructions:
         - Use the project-local MAYCAD skill as the source of truth:
@@ -952,11 +961,23 @@ def task_completion_check(task_dir: Path, stable_seconds: float = 5.0) -> Callab
     stable_snapshot: tuple[tuple[str, int, int], ...] | None = None
     stable_since = 0.0
 
+    def completion_marker_ready() -> bool:
+        marker_path = task_dir / TASK_COMPLETE_FILE
+        if not marker_path.is_file():
+            return False
+
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            return False
+
+        return isinstance(marker, dict) and marker.get("status") == "complete"
+
     def check() -> bool:
         nonlocal stable_snapshot, stable_since
 
         scenes = scene_files(task_dir)
-        if not scenes:
+        if not scenes or not completion_marker_ready():
             stable_snapshot = None
             stable_since = 0.0
             return False
@@ -967,7 +988,7 @@ def task_completion_check(task_dir: Path, stable_seconds: float = 5.0) -> Callab
             stable_snapshot = snapshot
             stable_since = now
             logger.debug(
-                "job.scene_seen task_dir=%s scenes=%s waiting_for_stable_seconds=%.1f",
+                "job.completion_marker_seen task_dir=%s scenes=%s waiting_for_stable_seconds=%.1f",
                 task_dir,
                 scenes,
                 stable_seconds,
@@ -976,7 +997,7 @@ def task_completion_check(task_dir: Path, stable_seconds: float = 5.0) -> Callab
 
         stable = now - stable_since >= stable_seconds
         if stable:
-            logger.debug("job.scene_stable task_dir=%s scenes=%s", task_dir, scenes)
+            logger.debug("job.completion_marker_stable task_dir=%s scenes=%s", task_dir, scenes)
         return stable
 
     return check
