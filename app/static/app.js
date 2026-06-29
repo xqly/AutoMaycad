@@ -143,6 +143,10 @@ function statusLabel(status) {
   return statusLabels[status] || status;
 }
 
+function displayModelText(value) {
+  return String(value || "").replaceAll(/codex/gi, "画图大模型");
+}
+
 function jobDisplayName(job) {
   return job.display_name?.trim() || "未命名任务";
 }
@@ -222,7 +226,7 @@ function renderAccount() {
 }
 
 function setLoginState(message, disabled = false) {
-  loginStatus.textContent = message;
+  loginStatus.textContent = displayModelText(message);
   loginButton.disabled = disabled;
 }
 
@@ -266,17 +270,17 @@ function setActiveNav() {
 }
 
 function setFormState(message, disabled = false) {
-  formStatus.textContent = message;
+  formStatus.textContent = displayModelText(message);
   submitButton.disabled = disabled;
 }
 
 function setPasswordState(message, disabled = false) {
-  passwordStatus.textContent = message;
+  passwordStatus.textContent = displayModelText(message);
   passwordButton.disabled = disabled;
 }
 
 function setUserState(message, disabled = false) {
-  userStatus.textContent = message;
+  userStatus.textContent = displayModelText(message);
   userButton.disabled = disabled;
 }
 
@@ -334,13 +338,13 @@ function validateImages(images) {
 function errorMessageFromResponse(response, fallback) {
   return response
     .json()
-    .then((payload) => payload.detail || fallback)
-    .catch(() => fallback);
+    .then((payload) => displayModelText(payload.detail || fallback))
+    .catch(() => displayModelText(fallback));
 }
 
 function showToast(message, duration = 2600) {
   window.clearTimeout(toastTimer);
-  toast.textContent = message;
+  toast.textContent = displayModelText(message);
   toast.hidden = false;
   toast.classList.add("toast-visible");
 
@@ -716,7 +720,7 @@ async function loadThreeViewPreview(host, job, file) {
       return;
     }
 
-    host.textContent = error.message || "无法加载三视图预览。";
+    host.textContent = displayModelText(error.message || "无法加载三视图预览。");
     host.classList.add("job-preview-error");
   }
 }
@@ -750,7 +754,7 @@ function appendOutput(container, job) {
   if (job.error) {
     const error = document.createElement("div");
     error.className = "job-error";
-    error.textContent = job.error;
+    error.textContent = displayModelText(job.error);
     output.append(error);
   }
 
@@ -758,9 +762,9 @@ function appendOutput(container, job) {
     const details = document.createElement("details");
     details.className = "job-output-details";
     const summary = document.createElement("summary");
-    summary.textContent = "模型输出";
+    summary.textContent = "画图大模型输出";
     const result = document.createElement("pre");
-    result.textContent = job.result;
+    result.textContent = displayModelText(job.result);
     details.append(summary, result);
     output.append(details);
   }
@@ -870,7 +874,7 @@ function renderJobError(message) {
   jobTitle.textContent = "任务";
   const empty = document.createElement("p");
   empty.className = "empty";
-  empty.textContent = message;
+  empty.textContent = displayModelText(message);
   jobDetailContainer.replaceChildren(empty);
 }
 
