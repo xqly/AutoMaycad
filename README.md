@@ -163,12 +163,15 @@ skills\maycad
 ```
 
 Each Codex task prompt points Codex at `skills\maycad\SKILL.md`, the scene XML
-reference, and the skill generator script. If Codex does not produce a scene,
-the server fallback loads:
+reference, and the skill generator script:
 
 ```text
 skills\maycad\scripts\generate_maycad_cabinet.py
 ```
+
+If Codex exits with an error, or exits successfully without producing a `.scene`
+file, the job is marked failed. The server does not generate fallback MAYCAD
+output after a failed Codex run.
 
 To test or replace the skill without changing the repository copy:
 
