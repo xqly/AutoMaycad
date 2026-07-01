@@ -897,7 +897,9 @@ def build_maycad_prompt(
           completion marker to exactly this path:
           {completion_marker_path}
           The marker must be UTF-8 JSON with at least:
-          {{"status":"complete","scene":"{scene_path}","verified":true}}
+          {{"status":"complete","scene":"{scene_path}","verified":true,"verification_scope":"XML parse, object counts, and manual geometry collision check for Panel/Profile objects"}}
+          Set verified to true only after the XML parses, object counts are
+          reasonable, and there is no obvious Panel/Profile geometry collision.
           Do not create this marker until all generation, edits, checks, and
           summaries are finished.
 
@@ -923,6 +925,33 @@ def build_maycad_prompt(
           summary file in the task folder.
         - Default to 4040 aluminum profile and 18 mm MDF/wood panels when the
           user does not specify materials.
+        - The final `.scene` must not contain physical overlap between Panel
+          and Profile objects. Treat a 4040 Profile as a real 40 mm x 40 mm
+          solid and an 18 mm Panel as a real 18 mm thick solid, not as a
+          zero-thickness plane.
+        - Place every panel in exactly one safe relationship to the frame:
+          outside-mounted, inset within clear opening dimensions, or sitting
+          above/supporting on profiles. Do not let panels share the same volume
+          as posts, front/rear rails, side rails, or depth rails.
+        - Use a default 1-2 mm assembly clearance between panels and profiles
+          unless the user gives tighter production details.
+        - Drawer fronts, door fronts, and decorative front panels must sit
+          outside the front frame and must avoid front horizontal rails. If the
+          front frame occupies depth 0-40 mm, an 18 mm front panel should be
+          centered outside that range, for example at depth -9 mm or beyond the
+          outside face, not at depth +9 mm inside the rail volume.
+        - Shelf boards must use clear opening dimensions in X and depth, and
+          their height must sit above support rails or inside a clear opening;
+          they must not cross a horizontal rail centerline or pass through
+          vertical posts.
+        - Side, top, and back panels must either be outside-mounted on the
+          frame exterior or inset to the clear internal opening. Do not create
+          panels directly from the finished outer dimensions if that would pass
+          through the 4040 frame volume.
+        - Before writing task_complete.json, inspect every Panel and Profile
+          coordinate, panel thickness, and 4040 profile volume. If any Panel
+          overlaps any Profile, edit the scene first by moving, shrinking, or
+          omitting the panel and explain the choice in the summary.
         - If the task is based mainly on reference images or sketches, default
           to a frame-only model unless the user explicitly asks for boards,
           shelves, panels, glass/acrylic, MDF, or wood parts.

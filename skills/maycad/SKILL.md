@@ -40,12 +40,14 @@ This is a file-generation workflow, not a live GUI drawing workflow. Generate a 
    - For rectangular cabinet/frame work, prefer `scripts/generate_maycad_cabinet.py`.
    - For custom geometry, adapt the generated `.scene` XML using `references/maycad-scene-format.md`.
    - For reference-image/sketch modeling, generate `Profile` objects only by default. Add `Panel` objects only when the user explicitly requests boards, shelves, door panels, side panels, glass/acrylic, MDF, or wood decorative panels.
+   - Build every panel as outside-mounted, inset within clear opening dimensions, or sitting above/supporting on profiles; never let a panel share physical volume with a profile.
    - Keep object names descriptive: profile direction, bay, panel role, drawer number, or support function.
 
 5. Open and verify in MAYCAD.
    - Launch `framedesigner.exe` with the generated `.scene` file.
    - Verify a MAYCAD window title contains the generated scene path.
    - Check `print_debug.log` for `SCENE LOADED IN` and object-loading messages.
+   - Before marking the task verified, manually check the generated scene geometry for obvious `Panel`/`Profile` collisions using object coordinates, panel thickness, and profile size.
    - If the workspace path contains non-ASCII characters or MAYCAD starts without showing the scene path, make an ASCII verification copy under `C:\Users\WINDOWS\Documents\maycad_output\`, launch that copy, and verify the window title against the copied path.
    - Treat the ASCII verification copy as a load-test artifact only; keep the workspace `.scene`, spec, summary, and three-view files as the primary deliverables.
    - Report non-fatal panel/BOM warnings separately from load failures.
@@ -120,6 +122,17 @@ The script writes:
 - `<project>.scene`: MAYCAD plain XML project file
 - `<project>_three_views.html`: visual front/top/side drawing
 - `<project>_summary.json`: object counts and major assumptions
+
+## Anti-Collision Rules
+
+- The final `.scene` must not contain physical overlap between `Panel` and `Profile` objects.
+- Treat `PROF40-4040L` 4040 profiles as real `40 mm x 40 mm` solids. Treat `PANL_CHIP_MDF-18MM` panels as real `18 mm` thick solids, not zero-thickness faces.
+- Keep a default `1-2 mm` assembly clearance between panels and profiles unless the user gives tighter production details.
+- Drawer fronts, door fronts, and decorative front panels must sit outside the front frame and avoid front horizontal rails. If the front frame occupies depth `0-40 mm`, an `18 mm` front panel should be centered outside that range, such as at depth `-9 mm` or beyond the outside face, not at depth `+9 mm`.
+- Shelf boards must use clear opening dimensions in X and depth, and their height must sit above support rails or inside a clear opening. They must not cross a horizontal rail centerline or pass through vertical posts.
+- Side, top, and back panels must either be outside-mounted on the frame exterior or inset to the clear internal opening. Do not create panels directly from finished outer dimensions if that would pass through the 4040 frame volume.
+- If a safe panel placement is uncertain, prefer omitting the panel or making a frame-only model, and explain the omission in the summary.
+- Set `verified: true` only after the XML parses, object counts are reasonable, and the model has no obvious `Panel`/`Profile` geometry collision. Completion marker `verification_scope` should include `manual geometry collision check for Panel/Profile objects`.
 
 ## MAYCAD Notes
 
