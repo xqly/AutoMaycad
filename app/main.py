@@ -29,7 +29,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
-from .codex_runner import CodexRunError, run_codex
+from .codex_runner import CodexRunError, CodexTokenUsage, run_codex
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -82,6 +82,13 @@ ALLOWED_IMAGE_TYPES = {
 DEBUG_MODE = os.getenv("AUTOMAYCAD_DEBUG", "").lower() in {"1", "true", "yes", "on"}
 LOG_LEVEL_NAME = os.getenv("LOG_LEVEL", "DEBUG" if DEBUG_MODE else "INFO").upper()
 LOG_LEVEL = getattr(logging, LOG_LEVEL_NAME, logging.INFO)
+TOKEN_USAGE_COLUMNS = (
+    "token_input_tokens",
+    "token_cached_input_tokens",
+    "token_output_tokens",
+    "token_reasoning_output_tokens",
+    "token_total_tokens",
+)
 
 
 def configure_logging() -> None:
@@ -476,6 +483,9 @@ def ensure_jobs_schema(connection: sqlite3.Connection) -> None:
         )
     if "owner" not in columns:
         connection.execute("ALTER TABLE jobs ADD COLUMN owner TEXT NOT NULL DEFAULT 'admin'")
+    for column in TOKEN_USAGE_COLUMNS:
+        if column not in columns:
+            connection.execute(f"ALTER TABLE jobs ADD COLUMN {column} INTEGER")
 
 
 def init_jobs_db() -> None:
@@ -498,6 +508,11 @@ def init_jobs_db() -> None:
                 result TEXT,
                 error TEXT,
                 generated_files TEXT NOT NULL DEFAULT '[]',
+                token_input_tokens INTEGER,
+                token_cached_input_tokens INTEGER,
+                token_output_tokens INTEGER,
+                token_reasoning_output_tokens INTEGER,
+                token_total_tokens INTEGER,
                 updated_at TEXT NOT NULL
             )
             """
@@ -624,6 +639,31 @@ def save_job(job: Job) -> None:
                 encode_generated_files(job.generated_files),
                 utc_now(),
                 job.id,
+            ),
+        )
+
+
+def save_job_token_usage(job_id: str, token_usage: CodexTokenUsage) -> None:
+    with connect_db() as connection:
+        connection.execute(
+            """
+            UPDATE jobs
+            SET token_input_tokens = ?,
+                token_cached_input_tokens = ?,
+                token_output_tokens = ?,
+                token_reasoning_output_tokens = ?,
+                token_total_tokens = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                token_usage.input_tokens,
+                token_usage.cached_input_tokens,
+                token_usage.output_tokens,
+                token_usage.reasoning_output_tokens,
+                token_usage.total_tokens,
+                utc_now(),
+                job_id,
             ),
         )
 
@@ -1402,15 +1442,20 @@ async def execute_job(
 
     result: str | None = None
     error: str | None = None
+    token_usage: CodexTokenUsage | None = None
     try:
-        result = await run_codex(
+        codex_result = await run_codex(
             codex_prompt,
+            job_id=job_id,
             image_paths=[str(path) for path in image_paths or []],
             completion_check=task_completion_check(task_dir),
             activity_snapshot=lambda: task_activity_snapshot(task_dir),
         )
+        result = codex_result.output
+        token_usage = codex_result.token_usage
     except CodexRunError as exc:
         result = exc.output or None
+        token_usage = exc.token_usage
         logger.warning(
             "job.codex_error job_id=%s error=%s output_chars=%s",
             job_id,
@@ -1475,6 +1520,20 @@ async def execute_job(
         job.result = result
         job.error = error
         refresh_job_outputs(job)
+        if token_usage is not None:
+            save_job_token_usage(job_id, token_usage)
+            logger.debug(
+                "job.token_usage job_id=%s status=%s input_tokens=%s cached_input_tokens=%s output_tokens=%s reasoning_output_tokens=%s total_tokens=%s",
+                job_id,
+                status.value,
+                token_usage.input_tokens,
+                token_usage.cached_input_tokens,
+                token_usage.output_tokens,
+                token_usage.reasoning_output_tokens,
+                token_usage.total_tokens,
+            )
+        else:
+            logger.debug("job.token_usage_unavailable job_id=%s status=%s", job_id, status.value)
         save_job(job)
         logger.info(
             "job.finish job_id=%s status=%s generated_files=%s error=%s",
