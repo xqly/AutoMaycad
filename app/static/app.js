@@ -491,7 +491,9 @@ function appendPaths(container, job) {
 
 function appendFiles(container, job) {
   const sceneFiles = job.generated_files?.filter((file) => file.toLowerCase().endsWith(".scene")) || [];
-  if (!sceneFiles.length) {
+  const scenePath = pathLabel(job.scene_path);
+  const finalSceneFile = sceneFiles.find((file) => scenePath.endsWith(`/${file}`) || scenePath === file) || sceneFiles[0];
+  if (!finalSceneFile) {
     return;
   }
 
@@ -501,7 +503,7 @@ function appendFiles(container, job) {
   filesTitle.textContent = "生成文件";
   const list = document.createElement("ul");
 
-  sceneFiles.forEach((file) => {
+  [finalSceneFile].forEach((file) => {
     const row = document.createElement("li");
     const link = document.createElement("a");
     link.href = downloadUrl(job.id, file);

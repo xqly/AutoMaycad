@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import hmac
@@ -917,6 +917,88 @@ def scene_files(task_dir: Path) -> list[str]:
     return [item for item in generated_files(task_dir) if item.lower().endswith(".scene")]
 
 
+def relative_task_file(task_dir: Path, path: Path | str) -> str | None:
+    task_dir = task_dir.resolve()
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = task_dir / candidate
+
+    try:
+        return candidate.resolve().relative_to(task_dir).as_posix()
+    except (OSError, ValueError):
+        return None
+
+
+def completion_marker_scene_file(task_dir: Path) -> str | None:
+    marker_path = task_dir / TASK_COMPLETE_FILE
+    if not marker_path.is_file():
+        return None
+
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if (
+        not isinstance(marker, dict)
+        or marker.get("status") != "complete"
+        or not isinstance(marker.get("scene"), str)
+    ):
+        return None
+
+    return relative_task_file(task_dir, marker["scene"])
+
+
+def latest_scene_file(task_dir: Path, scenes: list[str]) -> str | None:
+    scene_paths: list[tuple[float, str]] = []
+    for scene in scenes:
+        scene_path = task_dir / scene
+        try:
+            scene_paths.append((scene_path.stat().st_mtime, scene))
+        except OSError:
+            continue
+
+    if not scene_paths:
+        return None
+
+    return max(scene_paths, key=lambda item: (item[0], item[1]))[1]
+
+
+def final_scene_file(task_dir: Path, preferred_scene_path: Path | str | None = None) -> str | None:
+    scenes = scene_files(task_dir)
+    if not scenes:
+        return None
+
+    candidates: list[str | None] = []
+    candidates.append(completion_marker_scene_file(task_dir))
+    if preferred_scene_path is not None:
+        candidates.append(relative_task_file(task_dir, preferred_scene_path))
+    candidates.append(f"{task_dir.name}.scene")
+
+    for candidate in candidates:
+        if candidate in scenes:
+            return candidate
+
+    root_scenes = [scene for scene in scenes if "/" not in scene]
+    return latest_scene_file(task_dir, root_scenes) or latest_scene_file(task_dir, scenes)
+
+
+def visible_generated_files(
+    task_dir: Path,
+    preferred_scene_path: Path | str | None = None,
+) -> list[str]:
+    final_scene = final_scene_file(task_dir, preferred_scene_path)
+    files = generated_files(task_dir)
+    if final_scene is None:
+        return [file for file in files if not file.lower().endswith(".scene")]
+
+    return [
+        file
+        for file in files
+        if not file.lower().endswith(".scene") or file == final_scene
+    ]
+
+
 def sanitize_scene_file(scene_path: Path) -> None:
     try:
         scene_text = scene_path.read_text(encoding="utf-8-sig", errors="replace")
@@ -1004,10 +1086,21 @@ def task_completion_check(task_dir: Path, stable_seconds: float = 5.0) -> Callab
 
 
 def refresh_job_files(job: Job) -> bool:
-    files = generated_files(Path(job.task_dir))
-    if files == (job.generated_files or []):
+    return refresh_job_outputs(job)
+
+
+def refresh_job_outputs(job: Job) -> bool:
+    task_dir = Path(job.task_dir)
+    final_scene = final_scene_file(task_dir, job.scene_path)
+    scene_path = job.scene_path
+    if final_scene is not None:
+        scene_path = str((task_dir / final_scene).resolve())
+
+    files = visible_generated_files(task_dir, scene_path)
+    if files == (job.generated_files or []) and scene_path == job.scene_path:
         return False
 
+    job.scene_path = scene_path
     job.generated_files = files
     return True
 
@@ -1016,10 +1109,10 @@ def job_to_response(job: Job) -> JobResponse:
     return JobResponse(**asdict(job))
 
 
-def build_job_archive(task_dir: Path) -> io.BytesIO:
+def build_job_archive(task_dir: Path, preferred_scene_path: Path | str | None = None) -> io.BytesIO:
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, mode="w", compression=zipfile.ZIP_DEFLATED) as zip_file:
-        for relative_file in generated_files(task_dir):
+        for relative_file in visible_generated_files(task_dir, preferred_scene_path):
             source_path = (task_dir / relative_file).resolve()
             try:
                 source_path.relative_to(task_dir)
@@ -1060,9 +1153,11 @@ def recover_jobs_from_disk() -> None:
         requirement_path = task_dir / "shelf_requirements.md"
         sanitize_scene_files(task_dir)
         scenes = scene_files(task_dir)
-        scene_path = task_dir / scenes[0] if scenes else task_dir / f"{job_id}.scene"
+        default_scene_path = task_dir / f"{job_id}.scene"
+        final_scene = final_scene_file(task_dir, default_scene_path)
+        scene_path = task_dir / final_scene if final_scene else default_scene_path
         prompt = prompt_from_requirement(requirement_path)
-        files = generated_files(task_dir)
+        files = visible_generated_files(task_dir, scene_path)
         newest_mtime = max((path.stat().st_mtime for path in task_dir.rglob("*") if path.is_file()), default=task_dir.stat().st_mtime)
 
         insert_job(Job(
@@ -1085,7 +1180,7 @@ def reconcile_jobs_after_startup() -> None:
         task_dir = Path(job.task_dir)
         if task_dir.exists():
             sanitize_scene_files(task_dir)
-            refresh_job_files(job)
+            refresh_job_outputs(job)
 
         if job.status not in {JobStatus.QUEUED, JobStatus.RUNNING}:
             save_job(job)
@@ -1095,7 +1190,7 @@ def reconcile_jobs_after_startup() -> None:
         job.status = JobStatus.SUCCEEDED if scenes else JobStatus.FAILED
         job.finished_at = job.finished_at or utc_now()
         job.error = None if scenes else "服务重启，后台任务未继续运行。请重新创建任务。"
-        refresh_job_files(job)
+        refresh_job_outputs(job)
         save_job(job)
 
 
@@ -1379,7 +1474,7 @@ async def execute_job(
         job.finished_at = utc_now()
         job.result = result
         job.error = error
-        job.generated_files = generated_files(Path(job.task_dir))
+        refresh_job_outputs(job)
         save_job(job)
         logger.info(
             "job.finish job_id=%s status=%s generated_files=%s error=%s",
@@ -1557,7 +1652,7 @@ async def create_job(request: Request) -> CreateJobResponse:
         owner=user.username,
         status=JobStatus.QUEUED,
         created_at=utc_now(),
-        generated_files=generated_files(task_dir),
+        generated_files=visible_generated_files(task_dir, scene_path),
     )
 
     try:
@@ -1594,7 +1689,7 @@ async def list_jobs(request: Request, owner: str | None = None) -> list[JobRespo
         jobs = list_jobs_from_db(user, owner_filter)
         responses: list[JobResponse] = []
         for job in jobs:
-            if refresh_job_files(job):
+            if refresh_job_outputs(job):
                 save_job(job)
             responses.append(job_to_response(job))
         return responses
@@ -1630,6 +1725,9 @@ async def download_job_file(request: Request, job_id: str, file_path: str) -> Fi
 
     is_scene_file = resolved_path.suffix.lower() == ".scene"
     if is_scene_file:
+        final_scene = final_scene_file(task_dir, job.scene_path)
+        if normalized_file_path != final_scene:
+            raise HTTPException(status_code=404, detail="找不到该文件。")
         sanitize_scene_file(resolved_path)
 
     download_name = f"{job_id}.scene" if is_scene_file else resolved_path.name
@@ -1646,7 +1744,7 @@ async def download_all_job_files(request: Request, job_id: str) -> StreamingResp
         require_job_access(user, job)
         task_dir = Path(job.task_dir).resolve()
 
-    archive = build_job_archive(task_dir)
+    archive = build_job_archive(task_dir, job.scene_path)
     filename = f"{job_id}_files.zip"
     return StreamingResponse(
         archive,
@@ -1695,6 +1793,7 @@ async def get_job(request: Request, job_id: str) -> JobResponse:
         if job is None:
             raise HTTPException(status_code=404, detail="找不到该任务。")
         require_job_access(user, job)
-        if refresh_job_files(job):
+        if refresh_job_outputs(job):
             save_job(job)
         return job_to_response(job)
+
